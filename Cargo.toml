@@ -1,0 +1,31 @@
+[package]
+name = "turntf"
+version = "0.1.0"
+edition = "2021"
+description = "Rust SDK for turntf."
+license = "MIT"
+readme = "README.md"
+build = "build.rs"
+
+[lib]
+name = "turntf"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1.89"
+base64 = "0.22.1"
+bcrypt = "0.16.0"
+futures-util = { version = "0.3.31", default-features = false, features = ["sink"] }
+prost = "0.14.1"
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
+url = "2.5.7"
+
+[build-dependencies]
+prost-build = "0.14.1"
+protoc-bin-vendored = "3.2.0"
