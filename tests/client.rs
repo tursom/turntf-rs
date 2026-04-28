@@ -332,7 +332,9 @@ async fn read_client_envelope(
 ) -> ClientEnvelopeProto {
     loop {
         match ws.next().await.unwrap().unwrap() {
-            WsMessage::Binary(bytes) => return ClientEnvelopeProto::decode(bytes.as_ref()).unwrap(),
+            WsMessage::Binary(bytes) => {
+                return ClientEnvelopeProto::decode(bytes.as_ref()).unwrap()
+            }
             WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
             other => panic!("unexpected client frame: {other:?}"),
         }
@@ -343,7 +345,9 @@ async fn send_server_envelope(
     ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     env: ServerEnvelopeProto,
 ) {
-    ws.send(WsMessage::Binary(env.encode_to_vec().into())).await.unwrap();
+    ws.send(WsMessage::Binary(env.encode_to_vec().into()))
+        .await
+        .unwrap();
 }
 
 async fn next_event(
@@ -395,20 +399,22 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
         send_server_envelope(
             &mut ws,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::LoginResponse(LoginResponseProto {
-                    user: Some(UserProto {
-                        node_id: 4096,
-                        user_id: 1025,
-                        username: "alice".into(),
-                        role: "user".into(),
-                        profile_json: Vec::new(),
-                        system_reserved: false,
-                        created_at: String::new(),
-                        updated_at: String::new(),
-                        origin_node_id: 4096,
-                    }),
-                    protocol_version: "client-v1alpha1".into(),
-                })),
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                    },
+                )),
             },
         )
         .await;
@@ -416,9 +422,11 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
         send_server_envelope(
             &mut ws,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::MessagePushed(MessagePushedProto {
-                    message: Some(message_proto(7)),
-                })),
+                body: Some(server_envelope_proto::Body::MessagePushed(
+                    MessagePushedProto {
+                        message: Some(message_proto(7)),
+                    },
+                )),
             },
         )
         .await;
@@ -434,23 +442,26 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
         send_server_envelope(
             &mut ws,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::PacketPushed(PacketPushedProto {
-                    packet: Some(PacketProto {
-                        packet_id: 99,
-                        source_node_id: 4096,
-                        target_node_id: 4096,
-                        recipient: Some(user_ref(4096, 1025)),
-                        sender: Some(user_ref(4096, 1)),
-                        body: b"pkt".to_vec(),
-                        delivery_mode: 1,
-                    }),
-                })),
+                body: Some(server_envelope_proto::Body::PacketPushed(
+                    PacketPushedProto {
+                        packet: Some(PacketProto {
+                            packet_id: 99,
+                            source_node_id: 4096,
+                            target_node_id: 4096,
+                            recipient: Some(user_ref(4096, 1025)),
+                            sender: Some(user_ref(4096, 1)),
+                            body: b"pkt".to_vec(),
+                            delivery_mode: 1,
+                        }),
+                    },
+                )),
             },
         )
         .await;
 
         let send_message = read_client_envelope(&mut ws).await;
-        let client_envelope_proto::Body::SendMessage(send_message) = send_message.body.unwrap() else {
+        let client_envelope_proto::Body::SendMessage(send_message) = send_message.body.unwrap()
+        else {
             panic!("expected send_message request");
         };
         assert_eq!(send_message.request_id, 1);
@@ -469,7 +480,8 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
         .await;
 
         let send_packet = read_client_envelope(&mut ws).await;
-        let client_envelope_proto::Body::SendMessage(send_packet) = send_packet.body.unwrap() else {
+        let client_envelope_proto::Body::SendMessage(send_packet) = send_packet.body.unwrap()
+        else {
             panic!("expected transient send_message request");
         };
         assert_eq!(send_packet.delivery_kind, 2);
@@ -563,9 +575,16 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
 
     client.connect().await.unwrap();
 
-    assert!(matches!(next_event(&mut events).await.unwrap(), ClientEvent::Login(_)));
-    assert!(matches!(next_event(&mut events).await.unwrap(), ClientEvent::Message(message) if message.seq == 7));
-    assert!(matches!(next_event(&mut events).await.unwrap(), ClientEvent::Packet(packet) if packet.packet_id == 99));
+    assert!(matches!(
+        next_event(&mut events).await.unwrap(),
+        ClientEvent::Login(_)
+    ));
+    assert!(
+        matches!(next_event(&mut events).await.unwrap(), ClientEvent::Message(message) if message.seq == 7)
+    );
+    assert!(
+        matches!(next_event(&mut events).await.unwrap(), ClientEvent::Packet(packet) if packet.packet_id == 99)
+    );
 
     let message = client
         .send_message(
@@ -608,7 +627,10 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
     server.await.unwrap();
 
     assert_eq!(&*paths.lock().unwrap(), &["/ws/client".to_string()]);
-    assert_eq!(&store.state.lock().await.saved, &["message", "cursor", "message", "cursor"]);
+    assert_eq!(
+        &store.state.lock().await.saved,
+        &["message", "cursor", "message", "cursor"]
+    );
 }
 
 #[tokio::test]
@@ -630,29 +652,33 @@ async fn client_reconnects_with_seen_messages_and_realtime_path() {
         send_server_envelope(
             &mut first,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::LoginResponse(LoginResponseProto {
-                    user: Some(UserProto {
-                        node_id: 4096,
-                        user_id: 1025,
-                        username: "alice".into(),
-                        role: "user".into(),
-                        profile_json: Vec::new(),
-                        system_reserved: false,
-                        created_at: String::new(),
-                        updated_at: String::new(),
-                        origin_node_id: 4096,
-                    }),
-                    protocol_version: "client-v1alpha1".into(),
-                })),
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                    },
+                )),
             },
         )
         .await;
         send_server_envelope(
             &mut first,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::MessagePushed(MessagePushedProto {
-                    message: Some(message_proto(7)),
-                })),
+                body: Some(server_envelope_proto::Body::MessagePushed(
+                    MessagePushedProto {
+                        message: Some(message_proto(7)),
+                    },
+                )),
             },
         )
         .await;
@@ -666,7 +692,8 @@ async fn client_reconnects_with_seen_messages_and_realtime_path() {
         };
         seen_tx
             .send(
-                login.seen_messages
+                login
+                    .seen_messages
                     .into_iter()
                     .map(|cursor| (cursor.node_id, cursor.seq))
                     .collect::<Vec<_>>(),
@@ -675,20 +702,22 @@ async fn client_reconnects_with_seen_messages_and_realtime_path() {
         send_server_envelope(
             &mut second,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::LoginResponse(LoginResponseProto {
-                    user: Some(UserProto {
-                        node_id: 4096,
-                        user_id: 1025,
-                        username: "alice".into(),
-                        role: "user".into(),
-                        profile_json: Vec::new(),
-                        system_reserved: false,
-                        created_at: String::new(),
-                        updated_at: String::new(),
-                        origin_node_id: 4096,
-                    }),
-                    protocol_version: "client-v1alpha1".into(),
-                })),
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                    },
+                )),
             },
         )
         .await;
@@ -724,7 +753,10 @@ async fn client_reconnects_with_seen_messages_and_realtime_path() {
 
     assert_eq!(
         &*paths.lock().unwrap(),
-        &["/base/ws/realtime".to_string(), "/base/ws/realtime".to_string()]
+        &[
+            "/base/ws/realtime".to_string(),
+            "/base/ws/realtime".to_string()
+        ]
     );
 }
 
@@ -742,33 +774,39 @@ async fn client_does_not_ack_on_persist_failure_and_emits_error() {
         send_server_envelope(
             &mut ws,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::LoginResponse(LoginResponseProto {
-                    user: Some(UserProto {
-                        node_id: 4096,
-                        user_id: 1025,
-                        username: "alice".into(),
-                        role: "user".into(),
-                        profile_json: Vec::new(),
-                        system_reserved: false,
-                        created_at: String::new(),
-                        updated_at: String::new(),
-                        origin_node_id: 4096,
-                    }),
-                    protocol_version: "client-v1alpha1".into(),
-                })),
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                    },
+                )),
             },
         )
         .await;
         send_server_envelope(
             &mut ws,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::MessagePushed(MessagePushedProto {
-                    message: Some(message_proto(7)),
-                })),
+                body: Some(server_envelope_proto::Body::MessagePushed(
+                    MessagePushedProto {
+                        message: Some(message_proto(7)),
+                    },
+                )),
             },
         )
         .await;
-        let acked = timeout(Duration::from_millis(200), read_client_envelope(&mut ws)).await.is_ok();
+        let acked = timeout(Duration::from_millis(200), read_client_envelope(&mut ws))
+            .await
+            .is_ok();
         acked_tx.send(acked).ok();
     });
 
@@ -786,9 +824,15 @@ async fn client_does_not_ack_on_persist_failure_and_emits_error() {
     let mut events = client.subscribe().await;
 
     client.connect().await.unwrap();
-    assert!(matches!(next_event(&mut events).await.unwrap(), ClientEvent::Login(_)));
+    assert!(matches!(
+        next_event(&mut events).await.unwrap(),
+        ClientEvent::Login(_)
+    ));
     let error_event = next_event(&mut events).await.unwrap();
-    assert!(matches!(error_event, ClientEvent::Error(turntf::Error::Store(_))));
+    assert!(matches!(
+        error_event,
+        ClientEvent::Error(turntf::Error::Store(_))
+    ));
     assert!(!acked_rx.await.unwrap());
 
     client.close().await.unwrap();
@@ -809,20 +853,22 @@ async fn client_subscription_reports_lagged_and_closes() {
         send_server_envelope(
             &mut ws,
             ServerEnvelopeProto {
-                body: Some(server_envelope_proto::Body::LoginResponse(LoginResponseProto {
-                    user: Some(UserProto {
-                        node_id: 4096,
-                        user_id: 1025,
-                        username: "alice".into(),
-                        role: "user".into(),
-                        profile_json: Vec::new(),
-                        system_reserved: false,
-                        created_at: String::new(),
-                        updated_at: String::new(),
-                        origin_node_id: 4096,
-                    }),
-                    protocol_version: "client-v1alpha1".into(),
-                })),
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                    },
+                )),
             },
         )
         .await;
@@ -831,17 +877,19 @@ async fn client_subscription_reports_lagged_and_closes() {
             send_server_envelope(
                 &mut ws,
                 ServerEnvelopeProto {
-                    body: Some(server_envelope_proto::Body::PacketPushed(PacketPushedProto {
-                        packet: Some(PacketProto {
-                            packet_id,
-                            source_node_id: 4096,
-                            target_node_id: 4096,
-                            recipient: Some(user_ref(4096, 1025)),
-                            sender: Some(user_ref(4096, 1)),
-                            body: b"pkt".to_vec(),
-                            delivery_mode: 1,
-                        }),
-                    })),
+                    body: Some(server_envelope_proto::Body::PacketPushed(
+                        PacketPushedProto {
+                            packet: Some(PacketProto {
+                                packet_id,
+                                source_node_id: 4096,
+                                target_node_id: 4096,
+                                recipient: Some(user_ref(4096, 1025)),
+                                sender: Some(user_ref(4096, 1)),
+                                body: b"pkt".to_vec(),
+                                delivery_mode: 1,
+                            }),
+                        },
+                    )),
                 },
             )
             .await;
@@ -863,7 +911,10 @@ async fn client_subscription_reports_lagged_and_closes() {
     let mut events = client.subscribe().await;
 
     client.connect().await.unwrap();
-    assert!(matches!(next_event(&mut events).await.unwrap(), ClientEvent::Login(_)));
+    assert!(matches!(
+        next_event(&mut events).await.unwrap(),
+        ClientEvent::Login(_)
+    ));
     flood_tx.send(()).ok();
 
     match next_event(&mut events).await {
@@ -883,7 +934,10 @@ async fn client_subscription_reports_lagged_and_closes() {
     client.close().await.unwrap();
 
     loop {
-        match timeout(Duration::from_secs(1), events.next()).await.unwrap() {
+        match timeout(Duration::from_secs(1), events.next())
+            .await
+            .unwrap()
+        {
             Some(Ok(ClientEvent::Disconnect(_))) => continue,
             None => break,
             other => panic!("unexpected post-close event: {other:?}"),

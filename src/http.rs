@@ -5,16 +5,16 @@ use serde_json::{Map, Value};
 
 use crate::errors::{Error, Result, ServerError};
 use crate::mapping::{
-    blacklist_entry_from_http, cluster_node_from_http, delete_user_result_from_http,
-    event_from_http, expect_object, items_from_payload, json_bytes_to_value,
-    logged_in_user_from_http, message_from_http, operations_status_from_http,
-    relay_accepted_from_http, subscription_from_http, user_from_http,
+    attachment_from_http, blacklist_entry_from_attachment, cluster_node_from_http,
+    delete_user_result_from_http, event_from_http, expect_object, items_from_payload,
+    json_bytes_to_value, logged_in_user_from_http, message_from_http, operations_status_from_http,
+    relay_accepted_from_http, subscription_from_attachment, user_from_http,
 };
 use crate::password::{plain_password, PasswordInput};
 use crate::types::{
-    BlacklistEntry, ClusterNode, CreateUserRequest, DeleteUserResult, DeliveryMode, Event,
-    LoggedInUser, Message, OperationsStatus, RelayAccepted, Subscription, UpdateUserRequest, User,
-    UserRef,
+    Attachment, AttachmentType, BlacklistEntry, ClusterNode, CreateUserRequest, DeleteUserResult,
+    DeliveryMode, Event, LoggedInUser, Message, OperationsStatus, RelayAccepted, Subscription,
+    UpdateUserRequest, User, UserRef,
 };
 use crate::validation::{validate_delivery_mode, validate_positive_i64, validate_user_ref};
 
@@ -45,7 +45,12 @@ impl HttpClient {
         &self.base_url
     }
 
-    pub async fn login(&self, node_id: i64, user_id: i64, password: impl AsRef<str>) -> Result<String> {
+    pub async fn login(
+        &self,
+        node_id: i64,
+        user_id: i64,
+        password: impl AsRef<str>,
+    ) -> Result<String> {
         self.login_with_password(node_id, user_id, plain_password(password.as_ref())?)
             .await
     }
@@ -94,7 +99,10 @@ impl HttpClient {
         body.insert("username".into(), Value::from(request.username));
         body.insert("role".into(), Value::from(request.role));
         if let Some(password) = request.password {
-            body.insert("password".into(), Value::from(password.wire_value()?.to_owned()));
+            body.insert(
+                "password".into(),
+                Value::from(password.wire_value()?.to_owned()),
+            );
         }
         if !request.profile_json.is_empty() {
             body.insert(
@@ -104,12 +112,22 @@ impl HttpClient {
         }
 
         let response = self
-            .request_json(Method::POST, "/users", token, Some(Value::Object(body)), &[200, 201])
+            .request_json(
+                Method::POST,
+                "/users",
+                token,
+                Some(Value::Object(body)),
+                &[200, 201],
+            )
             .await?;
         user_from_http(expect_object(&response)?)
     }
 
-    pub async fn create_channel(&self, token: &str, mut request: CreateUserRequest) -> Result<User> {
+    pub async fn create_channel(
+        &self,
+        token: &str,
+        mut request: CreateUserRequest,
+    ) -> Result<User> {
         if request.role.is_empty() {
             request.role = "channel".to_owned();
         }
@@ -142,7 +160,10 @@ impl HttpClient {
             body.insert("username".into(), Value::from(username));
         }
         if let Some(password) = request.password {
-            body.insert("password".into(), Value::from(password.wire_value()?.to_owned()));
+            body.insert(
+                "password".into(),
+                Value::from(password.wire_value()?.to_owned()),
+            );
         }
         if let Some(profile_json) = request.profile_json {
             body.insert(
@@ -186,21 +207,16 @@ impl HttpClient {
         user: UserRef,
         channel: UserRef,
     ) -> Result<Subscription> {
-        validate_user_ref(&user, "user")?;
-        validate_user_ref(&channel, "channel")?;
-        let response = self
-            .request_json(
-                Method::POST,
-                &format!("/nodes/{}/users/{}/subscriptions", user.node_id, user.user_id),
+        let attachment = self
+            .upsert_attachment(
                 token,
-                Some(Value::Object(Map::from_iter([
-                    ("channel_node_id".into(), Value::from(channel.node_id)),
-                    ("channel_user_id".into(), Value::from(channel.user_id)),
-                ]))),
-                &[200, 201],
+                user,
+                channel,
+                AttachmentType::ChannelSubscription,
+                b"{}".to_vec(),
             )
             .await?;
-        subscription_from_http(expect_object(&response)?)
+        Ok(subscription_from_attachment(&attachment))
     }
 
     pub async fn subscribe_channel(
@@ -218,42 +234,35 @@ impl HttpClient {
         subscriber: UserRef,
         channel: UserRef,
     ) -> Result<Subscription> {
-        validate_user_ref(&subscriber, "subscriber")?;
-        validate_user_ref(&channel, "channel")?;
-        let response = self
-            .request_json(
-                Method::DELETE,
-                &format!(
-                    "/nodes/{}/users/{}/subscriptions/{}/{}",
-                    subscriber.node_id, subscriber.user_id, channel.node_id, channel.user_id
-                ),
+        let attachment = self
+            .delete_attachment(
                 token,
-                None,
-                &[200],
+                subscriber,
+                channel,
+                AttachmentType::ChannelSubscription,
             )
             .await?;
-        subscription_from_http(expect_object(&response)?)
+        Ok(subscription_from_attachment(&attachment))
     }
 
-    pub async fn list_subscriptions(&self, token: &str, subscriber: UserRef) -> Result<Vec<Subscription>> {
-        validate_user_ref(&subscriber, "subscriber")?;
-        let response = self
-            .request_json(
-                Method::GET,
-                &format!("/nodes/{}/users/{}/subscriptions", subscriber.node_id, subscriber.user_id),
-                token,
-                None,
-                &[200],
-            )
-            .await?;
-        items_from_payload(&response, &["items"])?
+    pub async fn list_subscriptions(
+        &self,
+        token: &str,
+        subscriber: UserRef,
+    ) -> Result<Vec<Subscription>> {
+        self.list_attachments(token, subscriber, Some(AttachmentType::ChannelSubscription))
+            .await?
             .into_iter()
-            .map(expect_object)
-            .map(|value| value.and_then(subscription_from_http))
+            .map(|attachment| Ok(subscription_from_attachment(&attachment)))
             .collect()
     }
 
-    pub async fn list_messages(&self, token: &str, target: UserRef, limit: i32) -> Result<Vec<Message>> {
+    pub async fn list_messages(
+        &self,
+        token: &str,
+        target: UserRef,
+        limit: i32,
+    ) -> Result<Vec<Message>> {
         validate_user_ref(&target, "target")?;
         let suffix = if limit > 0 {
             format!("?limit={limit}")
@@ -263,7 +272,10 @@ impl HttpClient {
         let response = self
             .request_json(
                 Method::GET,
-                &format!("/nodes/{}/users/{}/messages{suffix}", target.node_id, target.user_id),
+                &format!(
+                    "/nodes/{}/users/{}/messages{suffix}",
+                    target.node_id, target.user_id
+                ),
                 token,
                 None,
                 &[200],
@@ -276,7 +288,12 @@ impl HttpClient {
             .collect()
     }
 
-    pub async fn post_message(&self, token: &str, target: UserRef, body: Vec<u8>) -> Result<Message> {
+    pub async fn post_message(
+        &self,
+        token: &str,
+        target: UserRef,
+        body: Vec<u8>,
+    ) -> Result<Message> {
         validate_user_ref(&target, "target")?;
         if body.is_empty() {
             return Err(Error::validation("body is required"));
@@ -285,7 +302,10 @@ impl HttpClient {
         let response = self
             .request_json(
                 Method::POST,
-                &format!("/nodes/{}/users/{}/messages", target.node_id, target.user_id),
+                &format!(
+                    "/nodes/{}/users/{}/messages",
+                    target.node_id, target.user_id
+                ),
                 token,
                 Some(Value::Object(Map::from_iter([(
                     "body".into(),
@@ -348,7 +368,11 @@ impl HttpClient {
             .collect()
     }
 
-    pub async fn list_node_logged_in_users(&self, token: &str, node_id: i64) -> Result<Vec<LoggedInUser>> {
+    pub async fn list_node_logged_in_users(
+        &self,
+        token: &str,
+        node_id: i64,
+    ) -> Result<Vec<LoggedInUser>> {
         validate_positive_i64(node_id, "node_id")?;
         let response = self
             .request_json(
@@ -366,22 +390,22 @@ impl HttpClient {
             .collect()
     }
 
-    pub async fn block_user(&self, token: &str, owner: UserRef, blocked: UserRef) -> Result<BlacklistEntry> {
-        validate_user_ref(&owner, "owner")?;
-        validate_user_ref(&blocked, "blocked")?;
-        let response = self
-            .request_json(
-                Method::POST,
-                &format!("/nodes/{}/users/{}/blacklist", owner.node_id, owner.user_id),
+    pub async fn block_user(
+        &self,
+        token: &str,
+        owner: UserRef,
+        blocked: UserRef,
+    ) -> Result<BlacklistEntry> {
+        let attachment = self
+            .upsert_attachment(
                 token,
-                Some(Value::Object(Map::from_iter([
-                    ("blocked_node_id".into(), Value::from(blocked.node_id)),
-                    ("blocked_user_id".into(), Value::from(blocked.user_id)),
-                ]))),
-                &[200, 201],
+                owner,
+                blocked,
+                AttachmentType::UserBlacklist,
+                b"{}".to_vec(),
             )
             .await?;
-        blacklist_entry_from_http(expect_object(&response)?)
+        Ok(blacklist_entry_from_attachment(&attachment))
     }
 
     pub async fn unblock_user(
@@ -390,29 +414,106 @@ impl HttpClient {
         owner: UserRef,
         blocked: UserRef,
     ) -> Result<BlacklistEntry> {
+        let attachment = self
+            .delete_attachment(token, owner, blocked, AttachmentType::UserBlacklist)
+            .await?;
+        Ok(blacklist_entry_from_attachment(&attachment))
+    }
+
+    pub async fn list_blocked_users(
+        &self,
+        token: &str,
+        owner: UserRef,
+    ) -> Result<Vec<BlacklistEntry>> {
+        self.list_attachments(token, owner, Some(AttachmentType::UserBlacklist))
+            .await?
+            .into_iter()
+            .map(|attachment| Ok(blacklist_entry_from_attachment(&attachment)))
+            .collect()
+    }
+
+    pub async fn upsert_attachment(
+        &self,
+        token: &str,
+        owner: UserRef,
+        subject: UserRef,
+        attachment_type: AttachmentType,
+        config_json: Vec<u8>,
+    ) -> Result<Attachment> {
         validate_user_ref(&owner, "owner")?;
-        validate_user_ref(&blocked, "blocked")?;
+        validate_user_ref(&subject, "subject")?;
+        let config_json = if config_json.is_empty() {
+            Value::Object(Map::new())
+        } else {
+            json_bytes_to_value(&config_json, "config_json")?
+        };
+        let response = self
+            .request_json(
+                Method::PUT,
+                &format!(
+                    "/nodes/{}/users/{}/attachments/{}/{}/{}",
+                    owner.node_id,
+                    owner.user_id,
+                    attachment_type.as_str(),
+                    subject.node_id,
+                    subject.user_id
+                ),
+                token,
+                Some(Value::Object(Map::from_iter([(
+                    "config_json".into(),
+                    config_json,
+                )]))),
+                &[200, 201],
+            )
+            .await?;
+        attachment_from_http(expect_object(&response)?)
+    }
+
+    pub async fn delete_attachment(
+        &self,
+        token: &str,
+        owner: UserRef,
+        subject: UserRef,
+        attachment_type: AttachmentType,
+    ) -> Result<Attachment> {
+        validate_user_ref(&owner, "owner")?;
+        validate_user_ref(&subject, "subject")?;
         let response = self
             .request_json(
                 Method::DELETE,
                 &format!(
-                    "/nodes/{}/users/{}/blacklist/{}/{}",
-                    owner.node_id, owner.user_id, blocked.node_id, blocked.user_id
+                    "/nodes/{}/users/{}/attachments/{}/{}/{}",
+                    owner.node_id,
+                    owner.user_id,
+                    attachment_type.as_str(),
+                    subject.node_id,
+                    subject.user_id
                 ),
                 token,
                 None,
                 &[200],
             )
             .await?;
-        blacklist_entry_from_http(expect_object(&response)?)
+        attachment_from_http(expect_object(&response)?)
     }
 
-    pub async fn list_blocked_users(&self, token: &str, owner: UserRef) -> Result<Vec<BlacklistEntry>> {
+    pub async fn list_attachments(
+        &self,
+        token: &str,
+        owner: UserRef,
+        attachment_type: Option<AttachmentType>,
+    ) -> Result<Vec<Attachment>> {
         validate_user_ref(&owner, "owner")?;
+        let suffix = attachment_type
+            .map(|value| format!("?attachment_type={}", value.as_str()))
+            .unwrap_or_default();
         let response = self
             .request_json(
                 Method::GET,
-                &format!("/nodes/{}/users/{}/blacklist", owner.node_id, owner.user_id),
+                &format!(
+                    "/nodes/{}/users/{}/attachments{suffix}",
+                    owner.node_id, owner.user_id
+                ),
                 token,
                 None,
                 &[200],
@@ -421,7 +522,7 @@ impl HttpClient {
         items_from_payload(&response, &["items"])?
             .into_iter()
             .map(expect_object)
-            .map(|value| value.and_then(blacklist_entry_from_http))
+            .map(|value| value.and_then(attachment_from_http))
             .collect()
     }
 
@@ -439,7 +540,13 @@ impl HttpClient {
             format!("?{}", params.join("&"))
         };
         let response = self
-            .request_json(Method::GET, &format!("/events{suffix}"), token, None, &[200])
+            .request_json(
+                Method::GET,
+                &format!("/events{suffix}"),
+                token,
+                None,
+                &[200],
+            )
             .await?;
         items_from_payload(&response, &["items"])?
             .into_iter()
@@ -456,7 +563,8 @@ impl HttpClient {
     }
 
     pub async fn metrics(&self, token: &str) -> Result<String> {
-        self.request_text(Method::GET, "/metrics", token, None, &[200]).await
+        self.request_text(Method::GET, "/metrics", token, None, &[200])
+            .await
     }
 
     async fn request_json(
@@ -467,7 +575,9 @@ impl HttpClient {
         body: Option<Value>,
         statuses: &[u16],
     ) -> Result<Value> {
-        let text = self.request_text(method, path, token, body, statuses).await?;
+        let text = self
+            .request_text(method, path, token, body, statuses)
+            .await?;
         if text.trim().is_empty() {
             return Ok(Value::Null);
         }
@@ -484,7 +594,9 @@ impl HttpClient {
         statuses: &[u16],
     ) -> Result<String> {
         let op = format!("{} {}", method.as_str(), path);
-        let mut request = self.client.request(method, format!("{}{}", self.base_url, path));
+        let mut request = self
+            .client
+            .request(method, format!("{}{}", self.base_url, path));
         if !token.is_empty() {
             request = request.bearer_auth(token);
         }

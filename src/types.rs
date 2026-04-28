@@ -42,6 +42,26 @@ impl DeliveryMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttachmentType {
+    #[default]
+    ChannelManager,
+    ChannelWriter,
+    ChannelSubscription,
+    UserBlacklist,
+}
+
+impl AttachmentType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttachmentType::ChannelManager => "channel_manager",
+            AttachmentType::ChannelWriter => "channel_writer",
+            AttachmentType::ChannelSubscription => "channel_subscription",
+            AttachmentType::UserBlacklist => "user_blacklist",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub node_id: i64,
@@ -92,6 +112,17 @@ pub struct RelayAccepted {
     pub target_node_id: i64,
     pub recipient: UserRef,
     pub delivery_mode: DeliveryMode,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub owner: UserRef,
+    pub subject: UserRef,
+    pub attachment_type: AttachmentType,
+    pub config_json: Vec<u8>,
+    pub attached_at: String,
+    pub deleted_at: String,
+    pub origin_node_id: i64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

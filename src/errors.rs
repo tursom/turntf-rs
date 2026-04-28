@@ -36,7 +36,11 @@ pub struct ServerError {
 }
 
 impl ServerError {
-    pub fn new(code: impl Into<String>, server_message: impl Into<String>, request_id: u64) -> Self {
+    pub fn new(
+        code: impl Into<String>,
+        server_message: impl Into<String>,
+        request_id: u64,
+    ) -> Self {
         Self {
             code: code.into(),
             server_message: server_message.into(),

@@ -20,8 +20,8 @@ pub use http::HttpClient;
 pub use password::{hash_password, hashed_password, plain_password, PasswordInput, PasswordSource};
 pub use store::{BoxError, CursorStore, MemoryCursorStore};
 pub use types::{
-    BlacklistEntry, ClusterNode, Credentials, CreateUserRequest, DeleteUserResult, DeliveryMode,
-    Event, EventLogTrimStatus, LoggedInUser, LoginInfo, Message, MessageCursor, MessageTrimStatus,
-    OperationsStatus, Packet, PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted,
-    Subscription, UpdateUserRequest, User, UserRef,
+    Attachment, AttachmentType, BlacklistEntry, ClusterNode, CreateUserRequest, Credentials,
+    DeleteUserResult, DeliveryMode, Event, EventLogTrimStatus, LoggedInUser, LoginInfo, Message,
+    MessageCursor, MessageTrimStatus, OperationsStatus, Packet, PeerOriginStatus, PeerStatus,
+    ProjectionStatus, RelayAccepted, Subscription, UpdateUserRequest, User, UserRef,
 };

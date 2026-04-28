@@ -15,21 +15,25 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use url::Url;
 
-use crate::errors::{ClosedError, DisconnectedError, Error, NotConnectedError, Result, ServerError};
+use crate::errors::{
+    ClosedError, DisconnectedError, Error, NotConnectedError, Result, ServerError,
+};
 use crate::http::HttpClient;
 use crate::mapping::{
-    blacklist_entry_from_proto, cluster_node_from_proto, cursor_to_proto,
-    delivery_mode_to_proto, event_from_proto, logged_in_user_from_proto, login_info_from_proto,
-    message_from_proto, operations_status_from_proto, packet_from_proto,
-    relay_accepted_from_proto, subscription_from_proto, user_from_proto, user_ref_to_proto,
+    attachment_from_proto, attachment_type_to_proto, blacklist_entry_from_attachment,
+    cluster_node_from_proto, cursor_to_proto, delivery_mode_to_proto, event_from_proto,
+    logged_in_user_from_proto, login_info_from_proto, message_from_proto,
+    operations_status_from_proto, packet_from_proto, relay_accepted_from_proto,
+    subscription_from_attachment, user_from_proto, user_ref_to_proto,
 };
 use crate::password::PasswordInput;
 use crate::proto;
 use crate::store::CursorStore;
 use crate::types::{
-    default_cursor_store, BlacklistEntry, ClientConfigDefaults, ClusterNode, CreateUserRequest,
-    Credentials, DeleteUserResult, DeliveryMode, Event, LoggedInUser, LoginInfo, Message,
-    OperationsStatus, RelayAccepted, Subscription, UpdateUserRequest, User, UserRef,
+    default_cursor_store, Attachment, AttachmentType, BlacklistEntry, ClientConfigDefaults,
+    ClusterNode, CreateUserRequest, Credentials, DeleteUserResult, DeliveryMode, Event,
+    LoggedInUser, LoginInfo, Message, OperationsStatus, RelayAccepted, Subscription,
+    UpdateUserRequest, User, UserRef,
 };
 use crate::validation::{validate_delivery_mode, validate_positive_i64, validate_user_ref};
 
@@ -131,10 +135,8 @@ enum RpcValue {
     RelayAccepted(RelayAccepted),
     User(User),
     DeleteUserResult(DeleteUserResult),
-    Subscription(Subscription),
-    Subscriptions(Vec<Subscription>),
-    BlacklistEntry(BlacklistEntry),
-    BlacklistEntries(Vec<BlacklistEntry>),
+    Attachment(Attachment),
+    Attachments(Vec<Attachment>),
     Messages(Vec<Message>),
     Events(Vec<Event>),
     ClusterNodes(Vec<ClusterNode>),
@@ -191,7 +193,12 @@ impl Client {
         ClientSubscription { inner }
     }
 
-    pub async fn login(&self, node_id: i64, user_id: i64, password: impl AsRef<str>) -> Result<String> {
+    pub async fn login(
+        &self,
+        node_id: i64,
+        user_id: i64,
+        password: impl AsRef<str>,
+    ) -> Result<String> {
         self.inner.http.login(node_id, user_id, password).await
     }
 
@@ -274,7 +281,9 @@ impl Client {
     pub async fn ping(&self) -> Result<()> {
         match self
             .rpc(|request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::Ping(proto::Ping { request_id })),
+                body: Some(proto::client_envelope::Body::Ping(proto::Ping {
+                    request_id,
+                })),
             })
             .await?
         {
@@ -339,7 +348,9 @@ impl Client {
             .await?
         {
             RpcValue::RelayAccepted(accepted) => Ok(accepted),
-            _ => Err(Error::protocol("missing transient_accepted in send response")),
+            _ => Err(Error::protocol(
+                "missing transient_accepted in send response",
+            )),
         }
     }
 
@@ -395,10 +406,12 @@ impl Client {
         validate_user_ref(&target, "target")?;
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::GetUser(proto::GetUserRequest {
-                    request_id,
-                    user: Some(user_ref_to_proto(&target)),
-                })),
+                body: Some(proto::client_envelope::Body::GetUser(
+                    proto::GetUserRequest {
+                        request_id,
+                        user: Some(user_ref_to_proto(&target)),
+                    },
+                )),
             })
             .await?
         {
@@ -422,9 +435,9 @@ impl Client {
                         user: Some(user_ref_to_proto(&target)),
                         username: request.username.map(|value| proto::StringField { value }),
                         password: password.map(|value| proto::StringField { value }),
-                        profile_json: request
-                            .profile_json
-                            .map(|value| proto::BytesField { value: value.into() }),
+                        profile_json: request.profile_json.map(|value| proto::BytesField {
+                            value: value.into(),
+                        }),
                         role: request.role.map(|value| proto::StringField { value }),
                     },
                 )),
@@ -454,27 +467,27 @@ impl Client {
         }
     }
 
-    pub async fn subscribe_channel(&self, subscriber: UserRef, channel: UserRef) -> Result<Subscription> {
-        validate_user_ref(&subscriber, "subscriber")?;
-        validate_user_ref(&channel, "channel")?;
-        match self
-            .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::SubscribeChannel(
-                    proto::SubscribeChannelRequest {
-                        request_id,
-                        subscriber: Some(user_ref_to_proto(&subscriber)),
-                        channel: Some(user_ref_to_proto(&channel)),
-                    },
-                )),
-            })
-            .await?
-        {
-            RpcValue::Subscription(subscription) => Ok(subscription),
-            _ => Err(Error::protocol("missing subscription in subscribe_channel_response")),
-        }
+    pub async fn subscribe_channel(
+        &self,
+        subscriber: UserRef,
+        channel: UserRef,
+    ) -> Result<Subscription> {
+        let attachment = self
+            .upsert_attachment(
+                subscriber,
+                channel,
+                AttachmentType::ChannelSubscription,
+                b"{}".to_vec(),
+            )
+            .await?;
+        Ok(subscription_from_attachment(&attachment))
     }
 
-    pub async fn create_subscription(&self, subscriber: UserRef, channel: UserRef) -> Result<Subscription> {
+    pub async fn create_subscription(
+        &self,
+        subscriber: UserRef,
+        channel: UserRef,
+    ) -> Result<Subscription> {
         self.subscribe_channel(subscriber, channel).await
     }
 
@@ -483,98 +496,129 @@ impl Client {
         subscriber: UserRef,
         channel: UserRef,
     ) -> Result<Subscription> {
-        validate_user_ref(&subscriber, "subscriber")?;
-        validate_user_ref(&channel, "channel")?;
-        match self
-            .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::UnsubscribeChannel(
-                    proto::UnsubscribeChannelRequest {
-                        request_id,
-                        subscriber: Some(user_ref_to_proto(&subscriber)),
-                        channel: Some(user_ref_to_proto(&channel)),
-                    },
-                )),
-            })
-            .await?
-        {
-            RpcValue::Subscription(subscription) => Ok(subscription),
-            _ => Err(Error::protocol("missing subscription in unsubscribe_channel_response")),
-        }
+        let attachment = self
+            .delete_attachment(subscriber, channel, AttachmentType::ChannelSubscription)
+            .await?;
+        Ok(subscription_from_attachment(&attachment))
     }
 
     pub async fn list_subscriptions(&self, subscriber: UserRef) -> Result<Vec<Subscription>> {
-        validate_user_ref(&subscriber, "subscriber")?;
-        match self
-            .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::ListSubscriptions(
-                    proto::ListSubscriptionsRequest {
-                        request_id,
-                        subscriber: Some(user_ref_to_proto(&subscriber)),
-                    },
-                )),
-            })
+        self.list_attachments(subscriber, Some(AttachmentType::ChannelSubscription))
             .await?
-        {
-            RpcValue::Subscriptions(items) => Ok(items),
-            _ => Err(Error::protocol("missing items in list_subscriptions_response")),
-        }
+            .into_iter()
+            .map(|attachment| Ok(subscription_from_attachment(&attachment)))
+            .collect()
     }
 
     pub async fn block_user(&self, owner: UserRef, blocked: UserRef) -> Result<BlacklistEntry> {
-        validate_user_ref(&owner, "owner")?;
-        validate_user_ref(&blocked, "blocked")?;
-        match self
-            .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::BlockUser(
-                    proto::BlockUserRequest {
-                        request_id,
-                        owner: Some(user_ref_to_proto(&owner)),
-                        blocked: Some(user_ref_to_proto(&blocked)),
-                    },
-                )),
-            })
-            .await?
-        {
-            RpcValue::BlacklistEntry(entry) => Ok(entry),
-            _ => Err(Error::protocol("missing entry in block_user_response")),
-        }
+        let attachment = self
+            .upsert_attachment(
+                owner,
+                blocked,
+                AttachmentType::UserBlacklist,
+                b"{}".to_vec(),
+            )
+            .await?;
+        Ok(blacklist_entry_from_attachment(&attachment))
     }
 
     pub async fn unblock_user(&self, owner: UserRef, blocked: UserRef) -> Result<BlacklistEntry> {
-        validate_user_ref(&owner, "owner")?;
-        validate_user_ref(&blocked, "blocked")?;
-        match self
-            .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::UnblockUser(
-                    proto::UnblockUserRequest {
-                        request_id,
-                        owner: Some(user_ref_to_proto(&owner)),
-                        blocked: Some(user_ref_to_proto(&blocked)),
-                    },
-                )),
-            })
-            .await?
-        {
-            RpcValue::BlacklistEntry(entry) => Ok(entry),
-            _ => Err(Error::protocol("missing entry in unblock_user_response")),
-        }
+        let attachment = self
+            .delete_attachment(owner, blocked, AttachmentType::UserBlacklist)
+            .await?;
+        Ok(blacklist_entry_from_attachment(&attachment))
     }
 
     pub async fn list_blocked_users(&self, owner: UserRef) -> Result<Vec<BlacklistEntry>> {
+        self.list_attachments(owner, Some(AttachmentType::UserBlacklist))
+            .await?
+            .into_iter()
+            .map(|attachment| Ok(blacklist_entry_from_attachment(&attachment)))
+            .collect()
+    }
+
+    pub async fn upsert_attachment(
+        &self,
+        owner: UserRef,
+        subject: UserRef,
+        attachment_type: AttachmentType,
+        config_json: Vec<u8>,
+    ) -> Result<Attachment> {
         validate_user_ref(&owner, "owner")?;
+        validate_user_ref(&subject, "subject")?;
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::ListBlockedUsers(
-                    proto::ListBlockedUsersRequest {
+                body: Some(proto::client_envelope::Body::UpsertUserAttachment(
+                    proto::UpsertUserAttachmentRequest {
                         request_id,
                         owner: Some(user_ref_to_proto(&owner)),
+                        subject: Some(user_ref_to_proto(&subject)),
+                        attachment_type: attachment_type_to_proto(attachment_type),
+                        config_json: config_json.into(),
                     },
                 )),
             })
             .await?
         {
-            RpcValue::BlacklistEntries(items) => Ok(items),
-            _ => Err(Error::protocol("missing items in list_blocked_users_response")),
+            RpcValue::Attachment(attachment) => Ok(attachment),
+            _ => Err(Error::protocol(
+                "missing attachment in upsert_user_attachment_response",
+            )),
+        }
+    }
+
+    pub async fn delete_attachment(
+        &self,
+        owner: UserRef,
+        subject: UserRef,
+        attachment_type: AttachmentType,
+    ) -> Result<Attachment> {
+        validate_user_ref(&owner, "owner")?;
+        validate_user_ref(&subject, "subject")?;
+        match self
+            .rpc(move |request_id| proto::ClientEnvelope {
+                body: Some(proto::client_envelope::Body::DeleteUserAttachment(
+                    proto::DeleteUserAttachmentRequest {
+                        request_id,
+                        owner: Some(user_ref_to_proto(&owner)),
+                        subject: Some(user_ref_to_proto(&subject)),
+                        attachment_type: attachment_type_to_proto(attachment_type),
+                    },
+                )),
+            })
+            .await?
+        {
+            RpcValue::Attachment(attachment) => Ok(attachment),
+            _ => Err(Error::protocol(
+                "missing attachment in delete_user_attachment_response",
+            )),
+        }
+    }
+
+    pub async fn list_attachments(
+        &self,
+        owner: UserRef,
+        attachment_type: Option<AttachmentType>,
+    ) -> Result<Vec<Attachment>> {
+        validate_user_ref(&owner, "owner")?;
+        match self
+            .rpc(move |request_id| proto::ClientEnvelope {
+                body: Some(proto::client_envelope::Body::ListUserAttachments(
+                    proto::ListUserAttachmentsRequest {
+                        request_id,
+                        owner: Some(user_ref_to_proto(&owner)),
+                        attachment_type: attachment_type
+                            .map(attachment_type_to_proto)
+                            .unwrap_or(proto::AttachmentType::Unspecified as i32),
+                    },
+                )),
+            })
+            .await?
+        {
+            RpcValue::Attachments(items) => Ok(items),
+            _ => Err(Error::protocol(
+                "missing items in list_user_attachments_response",
+            )),
         }
     }
 
@@ -600,11 +644,13 @@ impl Client {
     pub async fn list_events(&self, after: i64, limit: i32) -> Result<Vec<Event>> {
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::ListEvents(proto::ListEventsRequest {
-                    request_id,
-                    after,
-                    limit,
-                })),
+                body: Some(proto::client_envelope::Body::ListEvents(
+                    proto::ListEventsRequest {
+                        request_id,
+                        after,
+                        limit,
+                    },
+                )),
             })
             .await?
         {
@@ -623,7 +669,9 @@ impl Client {
             .await?
         {
             RpcValue::ClusterNodes(items) => Ok(items),
-            _ => Err(Error::protocol("missing items in list_cluster_nodes_response")),
+            _ => Err(Error::protocol(
+                "missing items in list_cluster_nodes_response",
+            )),
         }
     }
 
@@ -632,7 +680,10 @@ impl Client {
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
                 body: Some(proto::client_envelope::Body::ListNodeLoggedInUsers(
-                    proto::ListNodeLoggedInUsersRequest { request_id, node_id },
+                    proto::ListNodeLoggedInUsersRequest {
+                        request_id,
+                        node_id,
+                    },
                 )),
             })
             .await?
@@ -654,16 +705,18 @@ impl Client {
             .await?
         {
             RpcValue::OperationsStatus(status) => Ok(status),
-            _ => Err(Error::protocol("missing status in operations_status_response")),
+            _ => Err(Error::protocol(
+                "missing status in operations_status_response",
+            )),
         }
     }
 
     pub async fn metrics(&self) -> Result<String> {
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
-                body: Some(proto::client_envelope::Body::Metrics(proto::MetricsRequest {
-                    request_id,
-                })),
+                body: Some(proto::client_envelope::Body::Metrics(
+                    proto::MetricsRequest { request_id },
+                )),
             })
             .await?
         {
@@ -758,7 +811,8 @@ impl Inner {
             })),
         };
         write_proto(&mut stream, login).await?;
-        let login_info = self.expect_login(&read_proto(&mut stream, self.is_closed().await).await?)?;
+        let login_info =
+            self.expect_login(&read_proto(&mut stream, self.is_closed().await).await?)?;
 
         let session_id = self.connection_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (writer, reader) = stream.split();
@@ -788,7 +842,8 @@ impl Inner {
                 Ok(()) => Error::from(DisconnectedError),
                 Err(error) => error.clone(),
             };
-            self.emit_event(ClientEvent::Disconnect(disconnect_error)).await;
+            self.emit_event(ClientEvent::Disconnect(disconnect_error))
+                .await;
         }
 
         read_result
@@ -806,16 +861,22 @@ impl Inner {
         }
     }
 
-    async fn handle_server_envelope(&self, _session_id: u64, env: proto::ServerEnvelope) -> Result<()> {
+    async fn handle_server_envelope(
+        &self,
+        _session_id: u64,
+        env: proto::ServerEnvelope,
+    ) -> Result<()> {
         match env.body {
             Some(proto::server_envelope::Body::MessagePushed(message)) => {
                 let message = message_from_proto(message.message.as_ref())?;
                 self.persist_message(message.clone()).await?;
                 if self.cfg.ack_messages {
                     let ack = proto::ClientEnvelope {
-                        body: Some(proto::client_envelope::Body::AckMessage(proto::AckMessage {
-                            cursor: Some(cursor_to_proto(&message.cursor())),
-                        })),
+                        body: Some(proto::client_envelope::Body::AckMessage(
+                            proto::AckMessage {
+                                cursor: Some(cursor_to_proto(&message.cursor())),
+                            },
+                        )),
                     };
                     match self.send_envelope(ack).await {
                         Err(Error::NotConnected(_)) | Err(Error::Closed(_)) => {}
@@ -826,8 +887,10 @@ impl Inner {
                 self.emit_event(ClientEvent::Message(message)).await;
             }
             Some(proto::server_envelope::Body::PacketPushed(packet)) => {
-                self.emit_event(ClientEvent::Packet(packet_from_proto(packet.packet.as_ref())?))
-                    .await;
+                self.emit_event(ClientEvent::Packet(packet_from_proto(
+                    packet.packet.as_ref(),
+                )?))
+                .await;
             }
             Some(proto::server_envelope::Body::SendMessageResponse(response)) => {
                 let result = match response.body {
@@ -838,24 +901,37 @@ impl Inner {
                             Err(error) => Err(error),
                         }
                     }
-                    Some(proto::send_message_response::Body::TransientAccepted(accepted)) => {
-                        Ok(RpcValue::RelayAccepted(relay_accepted_from_proto(Some(&accepted))?))
-                    }
+                    Some(proto::send_message_response::Body::TransientAccepted(accepted)) => Ok(
+                        RpcValue::RelayAccepted(relay_accepted_from_proto(Some(&accepted))?),
+                    ),
                     None => Err(Error::protocol("empty send_message_response")),
                 };
                 self.resolve_pending(response.request_id, result).await;
             }
             Some(proto::server_envelope::Body::Pong(pong)) => {
-                self.resolve_pending(pong.request_id, Ok(RpcValue::Unit)).await;
+                self.resolve_pending(pong.request_id, Ok(RpcValue::Unit))
+                    .await;
             }
             Some(proto::server_envelope::Body::CreateUserResponse(response)) => {
-                self.resolve_pending(response.request_id, Ok(RpcValue::User(user_from_proto(response.user.as_ref())?))).await;
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::User(user_from_proto(response.user.as_ref())?)),
+                )
+                .await;
             }
             Some(proto::server_envelope::Body::GetUserResponse(response)) => {
-                self.resolve_pending(response.request_id, Ok(RpcValue::User(user_from_proto(response.user.as_ref())?))).await;
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::User(user_from_proto(response.user.as_ref())?)),
+                )
+                .await;
             }
             Some(proto::server_envelope::Body::UpdateUserResponse(response)) => {
-                self.resolve_pending(response.request_id, Ok(RpcValue::User(user_from_proto(response.user.as_ref())?))).await;
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::User(user_from_proto(response.user.as_ref())?)),
+                )
+                .await;
             }
             Some(proto::server_envelope::Body::DeleteUserResponse(response)) => {
                 self.resolve_pending(
@@ -868,79 +944,83 @@ impl Inner {
                 .await;
             }
             Some(proto::server_envelope::Body::ListMessagesResponse(response)) => {
-                self.resolve_pending(response.request_id, Ok(RpcValue::Messages(messages_from_proto(&response.items)?))).await;
-            }
-            Some(proto::server_envelope::Body::SubscribeChannelResponse(response)) => {
                 self.resolve_pending(
                     response.request_id,
-                    Ok(RpcValue::Subscription(subscription_from_proto(response.subscription.as_ref())?)),
+                    Ok(RpcValue::Messages(messages_from_proto(&response.items)?)),
                 )
                 .await;
             }
-            Some(proto::server_envelope::Body::UnsubscribeChannelResponse(response)) => {
+            Some(proto::server_envelope::Body::UpsertUserAttachmentResponse(response)) => {
                 self.resolve_pending(
                     response.request_id,
-                    Ok(RpcValue::Subscription(subscription_from_proto(response.subscription.as_ref())?)),
+                    Ok(RpcValue::Attachment(attachment_from_proto(
+                        response.attachment.as_ref(),
+                    )?)),
                 )
                 .await;
             }
-            Some(proto::server_envelope::Body::ListSubscriptionsResponse(response)) => {
+            Some(proto::server_envelope::Body::DeleteUserAttachmentResponse(response)) => {
                 self.resolve_pending(
                     response.request_id,
-                    Ok(RpcValue::Subscriptions(subscriptions_from_proto(&response.items)?)),
+                    Ok(RpcValue::Attachment(attachment_from_proto(
+                        response.attachment.as_ref(),
+                    )?)),
                 )
                 .await;
             }
-            Some(proto::server_envelope::Body::BlockUserResponse(response)) => {
+            Some(proto::server_envelope::Body::ListUserAttachmentsResponse(response)) => {
                 self.resolve_pending(
                     response.request_id,
-                    Ok(RpcValue::BlacklistEntry(blacklist_entry_from_proto(response.entry.as_ref())?)),
-                )
-                .await;
-            }
-            Some(proto::server_envelope::Body::UnblockUserResponse(response)) => {
-                self.resolve_pending(
-                    response.request_id,
-                    Ok(RpcValue::BlacklistEntry(blacklist_entry_from_proto(response.entry.as_ref())?)),
-                )
-                .await;
-            }
-            Some(proto::server_envelope::Body::ListBlockedUsersResponse(response)) => {
-                self.resolve_pending(
-                    response.request_id,
-                    Ok(RpcValue::BlacklistEntries(blacklist_entries_from_proto(&response.items)?)),
+                    Ok(RpcValue::Attachments(attachments_from_proto(
+                        &response.items,
+                    )?)),
                 )
                 .await;
             }
             Some(proto::server_envelope::Body::ListEventsResponse(response)) => {
-                self.resolve_pending(response.request_id, Ok(RpcValue::Events(events_from_proto(&response.items)?))).await;
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::Events(events_from_proto(&response.items)?)),
+                )
+                .await;
             }
             Some(proto::server_envelope::Body::ListClusterNodesResponse(response)) => {
                 self.resolve_pending(
                     response.request_id,
-                    Ok(RpcValue::ClusterNodes(cluster_nodes_from_proto(&response.items)?)),
+                    Ok(RpcValue::ClusterNodes(cluster_nodes_from_proto(
+                        &response.items,
+                    )?)),
                 )
                 .await;
             }
             Some(proto::server_envelope::Body::ListNodeLoggedInUsersResponse(response)) => {
                 self.resolve_pending(
                     response.request_id,
-                    Ok(RpcValue::LoggedInUsers(logged_in_users_from_proto(&response.items)?)),
+                    Ok(RpcValue::LoggedInUsers(logged_in_users_from_proto(
+                        &response.items,
+                    )?)),
                 )
                 .await;
             }
             Some(proto::server_envelope::Body::OperationsStatusResponse(response)) => {
                 self.resolve_pending(
                     response.request_id,
-                    Ok(RpcValue::OperationsStatus(operations_status_from_proto(response.status.as_ref())?)),
+                    Ok(RpcValue::OperationsStatus(operations_status_from_proto(
+                        response.status.as_ref(),
+                    )?)),
                 )
                 .await;
             }
             Some(proto::server_envelope::Body::MetricsResponse(response)) => {
-                self.resolve_pending(response.request_id, Ok(RpcValue::Metrics(response.text))).await;
+                self.resolve_pending(response.request_id, Ok(RpcValue::Metrics(response.text)))
+                    .await;
             }
             Some(proto::server_envelope::Body::Error(error)) => {
-                let error = Error::from(ServerError::new(error.code, error.message, error.request_id));
+                let error = Error::from(ServerError::new(
+                    error.code,
+                    error.message,
+                    error.request_id,
+                ));
                 let request_id = match &error {
                     Error::Server(server) => server.request_id,
                     _ => 0,
@@ -952,7 +1032,9 @@ impl Inner {
                 }
             }
             Some(proto::server_envelope::Body::LoginResponse(_)) => {
-                return Err(Error::protocol("unexpected login_response after authentication"));
+                return Err(Error::protocol(
+                    "unexpected login_response after authentication",
+                ));
             }
             None => return Err(Error::protocol("unsupported server envelope")),
         }
@@ -961,14 +1043,19 @@ impl Inner {
 
     fn expect_login(&self, env: &proto::ServerEnvelope) -> Result<LoginInfo> {
         match env.body.as_ref() {
-            Some(proto::server_envelope::Body::LoginResponse(response)) => login_info_from_proto(response),
+            Some(proto::server_envelope::Body::LoginResponse(response)) => {
+                login_info_from_proto(response)
+            }
             Some(proto::server_envelope::Body::Error(error)) => {
                 if error.code == "unauthorized" {
                     if let Ok(mut state) = self.state.try_lock() {
                         state.stop_reconnect = true;
                     }
                 }
-                Err(ServerError::new(error.code.clone(), error.message.clone(), error.request_id).into())
+                Err(
+                    ServerError::new(error.code.clone(), error.message.clone(), error.request_id)
+                        .into(),
+                )
             }
             _ => Err(Error::protocol("expected login_response or error")),
         }
@@ -995,7 +1082,9 @@ impl Inner {
 
         let payload = env.encode_to_vec();
         let mut writer = self.writer.lock().await;
-        let active = writer.as_mut().ok_or_else(|| Error::from(NotConnectedError))?;
+        let active = writer
+            .as_mut()
+            .ok_or_else(|| Error::from(NotConnectedError))?;
         active
             .sink
             .send(WsMessage::Binary(payload.into()))
@@ -1058,7 +1147,8 @@ impl Inner {
         if state.closed || state.stop_reconnect || !self.cfg.reconnect {
             return false;
         }
-        !matches!(error, Error::Closed(_)) && !matches!(error, Error::Server(err) if err.unauthorized())
+        !matches!(error, Error::Closed(_))
+            && !matches!(error, Error::Server(err) if err.unauthorized())
     }
 
     async fn set_connected(&self, connected: bool) {
@@ -1100,15 +1190,20 @@ impl Inner {
             sleep(self.cfg.ping_interval).await;
             match self
                 .rpc(|request_id| proto::ClientEnvelope {
-                    body: Some(proto::client_envelope::Body::Ping(proto::Ping { request_id })),
+                    body: Some(proto::client_envelope::Body::Ping(proto::Ping {
+                        request_id,
+                    })),
                 })
                 .await
             {
                 Ok(RpcValue::Unit) => {}
-                Ok(_) => self
-                    .emit_event(ClientEvent::Error(Error::protocol("missing pong response")))
-                    .await,
-                Err(Error::NotConnected(_)) | Err(Error::Closed(_)) | Err(Error::Disconnected(_)) => {
+                Ok(_) => {
+                    self.emit_event(ClientEvent::Error(Error::protocol("missing pong response")))
+                        .await
+                }
+                Err(Error::NotConnected(_))
+                | Err(Error::Closed(_))
+                | Err(Error::Disconnected(_)) => {
                     return;
                 }
                 Err(error) => {
@@ -1169,7 +1264,8 @@ where
 }
 
 fn websocket_url(base: &str, realtime: bool) -> Result<String> {
-    let mut url = Url::parse(base).map_err(|err| Error::validation(format!("invalid base_url: {err}")))?;
+    let mut url =
+        Url::parse(base).map_err(|err| Error::validation(format!("invalid base_url: {err}")))?;
     match url.scheme() {
         "http" => {
             let _ = url.set_scheme("ws");
@@ -1178,11 +1274,19 @@ fn websocket_url(base: &str, realtime: bool) -> Result<String> {
             let _ = url.set_scheme("wss");
         }
         "ws" | "wss" => {}
-        other => return Err(Error::validation(format!("unsupported base URL scheme {other:?}"))),
+        other => {
+            return Err(Error::validation(format!(
+                "unsupported base URL scheme {other:?}"
+            )))
+        }
     }
 
     let base_path = url.path().trim_end_matches('/');
-    let path = if realtime { "/ws/realtime" } else { "/ws/client" };
+    let path = if realtime {
+        "/ws/realtime"
+    } else {
+        "/ws/client"
+    };
     if base_path.is_empty() {
         url.set_path(path);
     } else {
@@ -1193,25 +1297,24 @@ fn websocket_url(base: &str, realtime: bool) -> Result<String> {
     Ok(url.to_string())
 }
 fn messages_from_proto(items: &[proto::Message]) -> Result<Vec<Message>> {
-    items.iter().map(|item| message_from_proto(Some(item))).collect()
-}
-
-fn subscriptions_from_proto(items: &[proto::Subscription]) -> Result<Vec<Subscription>> {
     items
         .iter()
-        .map(|item| subscription_from_proto(Some(item)))
+        .map(|item| message_from_proto(Some(item)))
         .collect()
 }
 
-fn blacklist_entries_from_proto(items: &[proto::BlacklistEntry]) -> Result<Vec<BlacklistEntry>> {
+fn attachments_from_proto(items: &[proto::Attachment]) -> Result<Vec<Attachment>> {
     items
         .iter()
-        .map(|item| blacklist_entry_from_proto(Some(item)))
+        .map(|item| attachment_from_proto(Some(item)))
         .collect()
 }
 
 fn events_from_proto(items: &[proto::Event]) -> Result<Vec<Event>> {
-    items.iter().map(|item| event_from_proto(Some(item))).collect()
+    items
+        .iter()
+        .map(|item| event_from_proto(Some(item)))
+        .collect()
 }
 
 fn cluster_nodes_from_proto(items: &[proto::ClusterNode]) -> Result<Vec<ClusterNode>> {

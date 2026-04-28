@@ -223,40 +223,53 @@ async fn http_client_requests_and_encoding() {
                     200,
                 )
             }
-            ("DELETE", "/nodes/4096/users/1025") => {
-                HttpTestResponse::json(json!({ "status": "deleted", "node_id": 4096, "user_id": 1025 }), 200)
-            }
-            ("POST", "/nodes/4096/users/1025/subscriptions") => HttpTestResponse::json(
-                json!({
-                    "subscriber": { "node_id": 4096, "user_id": 1025 },
-                    "channel": { "node_id": 4096, "user_id": 2025 },
-                    "subscribed_at": "hlc-sub",
-                    "origin_node_id": 4096
-                }),
-                201,
+            ("DELETE", "/nodes/4096/users/1025") => HttpTestResponse::json(
+                json!({ "status": "deleted", "node_id": 4096, "user_id": 1025 }),
+                200,
             ),
-            ("GET", "/nodes/4096/users/1025/subscriptions") => HttpTestResponse::json(
-                json!({
-                    "items": [{
-                        "subscriber": { "node_id": 4096, "user_id": 1025 },
-                        "channel": { "node_id": 4096, "user_id": 2025 },
-                        "subscribed_at": "hlc-sub",
+            ("PUT", "/nodes/4096/users/1025/attachments/channel_subscription/4096/2025") => {
+                HttpTestResponse::json(
+                    json!({
+                        "owner": { "node_id": 4096, "user_id": 1025 },
+                        "subject": { "node_id": 4096, "user_id": 2025 },
+                        "attachment_type": "channel_subscription",
+                        "config_json": {},
+                        "attached_at": "hlc-sub",
                         "origin_node_id": 4096
-                    }],
-                    "count": 1
-                }),
-                200,
-            ),
-            ("DELETE", "/nodes/4096/users/1025/subscriptions/4096/2025") => HttpTestResponse::json(
-                json!({
-                    "subscriber": { "node_id": 4096, "user_id": 1025 },
-                    "channel": { "node_id": 4096, "user_id": 2025 },
-                    "subscribed_at": "hlc-sub",
-                    "deleted_at": "hlc-unsub",
-                    "origin_node_id": 4096
-                }),
-                200,
-            ),
+                    }),
+                    201,
+                )
+            }
+            ("GET", "/nodes/4096/users/1025/attachments?attachment_type=channel_subscription") => {
+                HttpTestResponse::json(
+                    json!({
+                        "items": [{
+                            "owner": { "node_id": 4096, "user_id": 1025 },
+                            "subject": { "node_id": 4096, "user_id": 2025 },
+                            "attachment_type": "channel_subscription",
+                            "config_json": {},
+                            "attached_at": "hlc-sub",
+                            "origin_node_id": 4096
+                        }],
+                        "count": 1
+                    }),
+                    200,
+                )
+            }
+            ("DELETE", "/nodes/4096/users/1025/attachments/channel_subscription/4096/2025") => {
+                HttpTestResponse::json(
+                    json!({
+                        "owner": { "node_id": 4096, "user_id": 1025 },
+                        "subject": { "node_id": 4096, "user_id": 2025 },
+                        "attachment_type": "channel_subscription",
+                        "config_json": {},
+                        "attached_at": "hlc-sub",
+                        "deleted_at": "hlc-unsub",
+                        "origin_node_id": 4096
+                    }),
+                    200,
+                )
+            }
             ("GET", "/nodes/4096/users/1025/messages?limit=20") => HttpTestResponse::json(
                 json!({
                     "items": [{
@@ -289,8 +302,14 @@ async fn http_client_requests_and_encoding() {
                 )
             }
             ("POST", "/nodes/8192/users/1025/messages") => {
-                assert_eq!(body.get("delivery_kind").and_then(Value::as_str), Some("transient"));
-                assert_eq!(body.get("delivery_mode").and_then(Value::as_str), Some("route_retry"));
+                assert_eq!(
+                    body.get("delivery_kind").and_then(Value::as_str),
+                    Some("transient")
+                );
+                assert_eq!(
+                    body.get("delivery_mode").and_then(Value::as_str),
+                    Some("route_retry")
+                );
                 HttpTestResponse::json(
                     json!({
                         "packet_id": 77,
@@ -321,37 +340,49 @@ async fn http_client_requests_and_encoding() {
                 ]),
                 200,
             ),
-            ("POST", "/nodes/4096/users/1025/blacklist") => HttpTestResponse::json(
-                json!({
-                    "owner": { "node_id": 4096, "user_id": 1025 },
-                    "blocked": { "node_id": 4096, "user_id": 1027 },
-                    "blocked_at": "hlc-blocked",
-                    "origin_node_id": 4096
-                }),
-                201,
-            ),
-            ("GET", "/nodes/4096/users/1025/blacklist") => HttpTestResponse::json(
-                json!({
-                    "items": [{
+            ("PUT", "/nodes/4096/users/1025/attachments/user_blacklist/4096/1027") => {
+                HttpTestResponse::json(
+                    json!({
                         "owner": { "node_id": 4096, "user_id": 1025 },
-                        "blocked": { "node_id": 4096, "user_id": 1027 },
-                        "blocked_at": "hlc-blocked",
+                        "subject": { "node_id": 4096, "user_id": 1027 },
+                        "attachment_type": "user_blacklist",
+                        "config_json": {},
+                        "attached_at": "hlc-blocked",
                         "origin_node_id": 4096
-                    }],
-                    "count": 1
-                }),
-                200,
-            ),
-            ("DELETE", "/nodes/4096/users/1025/blacklist/4096/1027") => HttpTestResponse::json(
-                json!({
-                    "owner": { "node_id": 4096, "user_id": 1025 },
-                    "blocked": { "node_id": 4096, "user_id": 1027 },
-                    "blocked_at": "hlc-blocked",
-                    "deleted_at": "hlc-unblocked",
-                    "origin_node_id": 4096
-                }),
-                200,
-            ),
+                    }),
+                    201,
+                )
+            }
+            ("GET", "/nodes/4096/users/1025/attachments?attachment_type=user_blacklist") => {
+                HttpTestResponse::json(
+                    json!({
+                        "items": [{
+                            "owner": { "node_id": 4096, "user_id": 1025 },
+                            "subject": { "node_id": 4096, "user_id": 1027 },
+                            "attachment_type": "user_blacklist",
+                            "config_json": {},
+                            "attached_at": "hlc-blocked",
+                            "origin_node_id": 4096
+                        }],
+                        "count": 1
+                    }),
+                    200,
+                )
+            }
+            ("DELETE", "/nodes/4096/users/1025/attachments/user_blacklist/4096/1027") => {
+                HttpTestResponse::json(
+                    json!({
+                        "owner": { "node_id": 4096, "user_id": 1025 },
+                        "subject": { "node_id": 4096, "user_id": 1027 },
+                        "attachment_type": "user_blacklist",
+                        "config_json": {},
+                        "attached_at": "hlc-blocked",
+                        "deleted_at": "hlc-unblocked",
+                        "origin_node_id": 4096
+                    }),
+                    200,
+                )
+            }
             ("GET", "/events") => HttpTestResponse::json(
                 json!({
                     "items": [{
@@ -554,9 +585,15 @@ async fn http_client_requests_and_encoding() {
     assert_eq!(nodes.len(), 2);
     assert_eq!(nodes[1].source, "discovered");
 
-    let users = client.list_node_logged_in_users(&token, 4096).await.unwrap();
+    let users = client
+        .list_node_logged_in_users(&token, 4096)
+        .await
+        .unwrap();
     assert_eq!(
-        users.iter().map(|user| user.username.as_str()).collect::<Vec<_>>(),
+        users
+            .iter()
+            .map(|user| user.username.as_str())
+            .collect::<Vec<_>>(),
         vec!["alice", "bob"]
     );
 
@@ -632,17 +669,20 @@ async fn http_client_requests_and_encoding() {
 
 #[tokio::test]
 async fn http_client_maps_server_errors_and_validates_node_id() {
-    let (base_url, server) = spawn_http_server(|request| {
-        match (request.method.as_str(), request.path.as_str()) {
-            ("GET", "/cluster/nodes/0/logged-in-users") => panic!("should not reach invalid node_id route"),
-            ("GET", "/nodes/4096/users/1025") => HttpTestResponse::json(
-                json!({ "code": "unauthorized", "message": "bad token" }),
-                401,
-            ),
-            other => panic!("unexpected route: {other:?}"),
-        }
-    })
-    .await;
+    let (base_url, server) =
+        spawn_http_server(
+            |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/cluster/nodes/0/logged-in-users") => {
+                    panic!("should not reach invalid node_id route")
+                }
+                ("GET", "/nodes/4096/users/1025") => HttpTestResponse::json(
+                    json!({ "code": "unauthorized", "message": "bad token" }),
+                    401,
+                ),
+                other => panic!("unexpected route: {other:?}"),
+            },
+        )
+        .await;
 
     let client = HttpClient::new(base_url).unwrap();
     let error = client

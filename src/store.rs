@@ -57,14 +57,17 @@ impl CursorStore for MemoryCursorStore {
 
     async fn save_cursor(&self, cursor: MessageCursor) -> std::result::Result<(), BoxError> {
         let mut state = self.inner.lock().await;
-        state.messages.entry(cursor.clone()).or_insert_with(|| Message {
-            recipient: UserRef::default(),
-            node_id: cursor.node_id,
-            seq: cursor.seq,
-            sender: UserRef::default(),
-            body: Vec::new(),
-            created_at_hlc: String::new(),
-        });
+        state
+            .messages
+            .entry(cursor.clone())
+            .or_insert_with(|| Message {
+                recipient: UserRef::default(),
+                node_id: cursor.node_id,
+                seq: cursor.seq,
+                sender: UserRef::default(),
+                body: Vec::new(),
+                created_at_hlc: String::new(),
+            });
         if !state.order.contains(&cursor) {
             state.order.push(cursor);
         }

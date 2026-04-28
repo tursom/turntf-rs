@@ -5,9 +5,10 @@ use serde_json::{Map, Value};
 use crate::errors::{Error, Result};
 use crate::proto;
 use crate::types::{
-    BlacklistEntry, ClusterNode, DeleteUserResult, DeliveryMode, Event, EventLogTrimStatus,
-    LoggedInUser, LoginInfo, Message, MessageCursor, MessageTrimStatus, OperationsStatus, Packet,
-    PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted, Subscription, User, UserRef,
+    Attachment, AttachmentType, BlacklistEntry, ClusterNode, DeleteUserResult, DeliveryMode, Event,
+    EventLogTrimStatus, LoggedInUser, LoginInfo, Message, MessageCursor, MessageTrimStatus,
+    OperationsStatus, Packet, PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted,
+    Subscription, User, UserRef,
 };
 
 pub(crate) fn delivery_mode_to_proto(mode: DeliveryMode) -> i32 {
@@ -23,6 +24,27 @@ pub(crate) fn delivery_mode_from_proto(mode: i32) -> DeliveryMode {
         Some(proto::ClientDeliveryMode::BestEffort) => DeliveryMode::BestEffort,
         Some(proto::ClientDeliveryMode::RouteRetry) => DeliveryMode::RouteRetry,
         _ => DeliveryMode::Unspecified,
+    }
+}
+
+pub(crate) fn attachment_type_to_proto(attachment_type: AttachmentType) -> i32 {
+    match attachment_type {
+        AttachmentType::ChannelManager => proto::AttachmentType::ChannelManager as i32,
+        AttachmentType::ChannelWriter => proto::AttachmentType::ChannelWriter as i32,
+        AttachmentType::ChannelSubscription => proto::AttachmentType::ChannelSubscription as i32,
+        AttachmentType::UserBlacklist => proto::AttachmentType::UserBlacklist as i32,
+    }
+}
+
+pub(crate) fn attachment_type_from_proto(attachment_type: i32) -> Result<AttachmentType> {
+    match proto::AttachmentType::try_from(attachment_type).ok() {
+        Some(proto::AttachmentType::ChannelManager) => Ok(AttachmentType::ChannelManager),
+        Some(proto::AttachmentType::ChannelWriter) => Ok(AttachmentType::ChannelWriter),
+        Some(proto::AttachmentType::ChannelSubscription) => Ok(AttachmentType::ChannelSubscription),
+        Some(proto::AttachmentType::UserBlacklist) => Ok(AttachmentType::UserBlacklist),
+        _ => Err(Error::protocol(format!(
+            "unsupported attachment type {attachment_type}"
+        ))),
     }
 }
 
@@ -87,7 +109,9 @@ pub(crate) fn packet_from_proto(value: Option<&proto::Packet>) -> Result<Packet>
     })
 }
 
-pub(crate) fn relay_accepted_from_proto(value: Option<&proto::TransientAccepted>) -> Result<RelayAccepted> {
+pub(crate) fn relay_accepted_from_proto(
+    value: Option<&proto::TransientAccepted>,
+) -> Result<RelayAccepted> {
     let value = value.ok_or_else(|| Error::protocol("missing transient_accepted"))?;
     Ok(RelayAccepted {
         packet_id: value.packet_id,
@@ -98,24 +122,52 @@ pub(crate) fn relay_accepted_from_proto(value: Option<&proto::TransientAccepted>
     })
 }
 
-pub(crate) fn subscription_from_proto(value: Option<&proto::Subscription>) -> Result<Subscription> {
-    let value = value.ok_or_else(|| Error::protocol("missing subscription"))?;
-    Ok(Subscription {
-        subscriber: user_ref_from_proto(value.subscriber.as_ref()),
-        channel: user_ref_from_proto(value.channel.as_ref()),
-        subscribed_at: value.subscribed_at.clone(),
+pub(crate) fn attachment_from_proto(value: Option<&proto::Attachment>) -> Result<Attachment> {
+    let value = value.ok_or_else(|| Error::protocol("missing attachment"))?;
+    Ok(Attachment {
+        owner: user_ref_from_proto(value.owner.as_ref()),
+        subject: user_ref_from_proto(value.subject.as_ref()),
+        attachment_type: attachment_type_from_proto(value.attachment_type)?,
+        config_json: value.config_json.to_vec(),
+        attached_at: value.attached_at.clone(),
         deleted_at: value.deleted_at.clone(),
         origin_node_id: value.origin_node_id,
     })
 }
 
-pub(crate) fn blacklist_entry_from_proto(value: Option<&proto::BlacklistEntry>) -> Result<BlacklistEntry> {
-    let value = value.ok_or_else(|| Error::protocol("missing blacklist entry"))?;
-    Ok(BlacklistEntry {
-        owner: user_ref_from_proto(value.owner.as_ref()),
-        blocked: user_ref_from_proto(value.blocked.as_ref()),
-        blocked_at: value.blocked_at.clone(),
+pub(crate) fn subscription_from_attachment(value: &Attachment) -> Subscription {
+    Subscription {
+        subscriber: value.owner.clone(),
+        channel: value.subject.clone(),
+        subscribed_at: value.attached_at.clone(),
         deleted_at: value.deleted_at.clone(),
+        origin_node_id: value.origin_node_id,
+    }
+}
+
+pub(crate) fn blacklist_entry_from_attachment(value: &Attachment) -> BlacklistEntry {
+    BlacklistEntry {
+        owner: value.owner.clone(),
+        blocked: value.subject.clone(),
+        blocked_at: value.attached_at.clone(),
+        deleted_at: value.deleted_at.clone(),
+        origin_node_id: value.origin_node_id,
+    }
+}
+
+pub(crate) fn subscription_from_proto(value: Option<&proto::Attachment>) -> Result<Subscription> {
+    Ok(subscription_from_attachment(&attachment_from_proto(value)?))
+}
+
+pub(crate) fn blacklist_entry_from_proto(
+    value: Option<&proto::Attachment>,
+) -> Result<BlacklistEntry> {
+    let value = attachment_from_proto(value)?;
+    Ok(BlacklistEntry {
+        owner: value.owner,
+        blocked: value.subject,
+        blocked_at: value.attached_at,
+        deleted_at: value.deleted_at,
         origin_node_id: value.origin_node_id,
     })
 }
@@ -145,7 +197,9 @@ pub(crate) fn cluster_node_from_proto(value: Option<&proto::ClusterNode>) -> Res
     })
 }
 
-pub(crate) fn logged_in_user_from_proto(value: Option<&proto::LoggedInUser>) -> Result<LoggedInUser> {
+pub(crate) fn logged_in_user_from_proto(
+    value: Option<&proto::LoggedInUser>,
+) -> Result<LoggedInUser> {
     let value = value.ok_or_else(|| Error::protocol("missing logged-in user"))?;
     Ok(LoggedInUser {
         node_id: value.node_id,
@@ -154,7 +208,9 @@ pub(crate) fn logged_in_user_from_proto(value: Option<&proto::LoggedInUser>) -> 
     })
 }
 
-pub(crate) fn operations_status_from_proto(value: Option<&proto::OperationsStatus>) -> Result<OperationsStatus> {
+pub(crate) fn operations_status_from_proto(
+    value: Option<&proto::OperationsStatus>,
+) -> Result<OperationsStatus> {
     let value = value.ok_or_else(|| Error::protocol("missing operations status"))?;
     Ok(OperationsStatus {
         node_id: value.node_id,
@@ -177,28 +233,36 @@ pub(crate) fn operations_status_from_proto(value: Option<&proto::OperationsStatu
     })
 }
 
-pub(crate) fn message_trim_status_from_proto(value: Option<&proto::MessageTrimStatus>) -> MessageTrimStatus {
+pub(crate) fn message_trim_status_from_proto(
+    value: Option<&proto::MessageTrimStatus>,
+) -> MessageTrimStatus {
     value.map_or_else(MessageTrimStatus::default, |value| MessageTrimStatus {
         trimmed_total: value.trimmed_total,
         last_trimmed_at: value.last_trimmed_at.clone(),
     })
 }
 
-pub(crate) fn event_log_trim_status_from_proto(value: &proto::EventLogTrimStatus) -> Result<EventLogTrimStatus> {
+pub(crate) fn event_log_trim_status_from_proto(
+    value: &proto::EventLogTrimStatus,
+) -> Result<EventLogTrimStatus> {
     Ok(EventLogTrimStatus {
         trimmed_total: value.trimmed_total,
         last_trimmed_at: value.last_trimmed_at.clone(),
     })
 }
 
-pub(crate) fn projection_status_from_proto(value: Option<&proto::ProjectionStatus>) -> ProjectionStatus {
+pub(crate) fn projection_status_from_proto(
+    value: Option<&proto::ProjectionStatus>,
+) -> ProjectionStatus {
     value.map_or_else(ProjectionStatus::default, |value| ProjectionStatus {
         pending_total: value.pending_total,
         last_failed_at: value.last_failed_at.clone(),
     })
 }
 
-pub(crate) fn peer_origin_status_from_proto(value: &proto::PeerOriginStatus) -> Result<PeerOriginStatus> {
+pub(crate) fn peer_origin_status_from_proto(
+    value: &proto::PeerOriginStatus,
+) -> Result<PeerOriginStatus> {
     Ok(PeerOriginStatus {
         origin_node_id: value.origin_node_id,
         acked_event_id: value.acked_event_id,
@@ -302,24 +366,30 @@ pub(crate) fn relay_accepted_from_http(value: &Map<String, Value>) -> Result<Rel
     })
 }
 
-pub(crate) fn subscription_from_http(value: &Map<String, Value>) -> Result<Subscription> {
-    Ok(Subscription {
-        subscriber: user_ref_from_http(value.get("subscriber")),
-        channel: user_ref_from_http(value.get("channel")),
-        subscribed_at: str_value(value.get("subscribed_at")),
+pub(crate) fn attachment_from_http(value: &Map<String, Value>) -> Result<Attachment> {
+    let config_json = match value.get("config_json") {
+        Some(value) => json_value_to_bytes(Some(value))?,
+        None => json_value_to_bytes(Some(&Value::Object(Map::new())))?,
+    };
+    Ok(Attachment {
+        owner: user_ref_from_http(value.get("owner")),
+        subject: user_ref_from_http(value.get("subject")),
+        attachment_type: attachment_type_from_http(value.get("attachment_type"))?,
+        config_json,
+        attached_at: str_value(value.get("attached_at")),
         deleted_at: str_value(value.get("deleted_at")),
         origin_node_id: int_value(value.get("origin_node_id")),
     })
 }
 
+pub(crate) fn subscription_from_http(value: &Map<String, Value>) -> Result<Subscription> {
+    Ok(subscription_from_attachment(&attachment_from_http(value)?))
+}
+
 pub(crate) fn blacklist_entry_from_http(value: &Map<String, Value>) -> Result<BlacklistEntry> {
-    Ok(BlacklistEntry {
-        owner: user_ref_from_http(value.get("owner")),
-        blocked: user_ref_from_http(value.get("blocked")),
-        blocked_at: str_value(value.get("blocked_at")),
-        deleted_at: str_value(value.get("deleted_at")),
-        origin_node_id: int_value(value.get("origin_node_id")),
-    })
+    Ok(blacklist_entry_from_attachment(&attachment_from_http(
+        value,
+    )?))
 }
 
 pub(crate) fn event_from_http(value: &Map<String, Value>) -> Result<Event> {
@@ -375,6 +445,18 @@ pub(crate) fn operations_status_from_http(value: &Map<String, Value>) -> Result<
     })
 }
 
+fn attachment_type_from_http(value: Option<&Value>) -> Result<AttachmentType> {
+    match str_value(value).as_str() {
+        "channel_manager" => Ok(AttachmentType::ChannelManager),
+        "channel_writer" => Ok(AttachmentType::ChannelWriter),
+        "channel_subscription" => Ok(AttachmentType::ChannelSubscription),
+        "user_blacklist" => Ok(AttachmentType::UserBlacklist),
+        other => Err(Error::protocol(format!(
+            "unsupported attachment type {other:?}"
+        ))),
+    }
+}
+
 pub(crate) fn message_trim_status_from_http(value: Option<&Value>) -> MessageTrimStatus {
     let Some(Value::Object(value)) = value else {
         return MessageTrimStatus::default();
@@ -385,7 +467,9 @@ pub(crate) fn message_trim_status_from_http(value: Option<&Value>) -> MessageTri
     }
 }
 
-pub(crate) fn event_log_trim_status_from_http(value: &Map<String, Value>) -> Result<EventLogTrimStatus> {
+pub(crate) fn event_log_trim_status_from_http(
+    value: &Map<String, Value>,
+) -> Result<EventLogTrimStatus> {
     Ok(EventLogTrimStatus {
         trimmed_total: int_value(value.get("trimmed_total")),
         last_trimmed_at: str_value(value.get("last_trimmed_at")),
@@ -468,7 +552,8 @@ pub(crate) fn json_bytes_to_value(data: &[u8], field: &str) -> Result<Value> {
 }
 
 pub(crate) fn expect_object(value: &Value) -> Result<&Map<String, Value>> {
-    value.as_object()
+    value
+        .as_object()
         .ok_or_else(|| Error::protocol("unexpected JSON object"))
 }
 
