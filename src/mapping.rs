@@ -7,8 +7,8 @@ use crate::proto;
 use crate::types::{
     Attachment, AttachmentType, BlacklistEntry, ClusterNode, DeleteUserResult, DeliveryMode, Event,
     EventLogTrimStatus, LoggedInUser, LoginInfo, Message, MessageCursor, MessageTrimStatus,
-    OperationsStatus, Packet, PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted,
-    Subscription, User, UserRef,
+    OnlineNodePresence, OperationsStatus, Packet, PeerOriginStatus, PeerStatus, ProjectionStatus,
+    RelayAccepted, ResolvedSession, ResolvedUserSessions, SessionRef, Subscription, User, UserRef,
 };
 
 pub(crate) fn delivery_mode_to_proto(mode: DeliveryMode) -> i32 {
@@ -62,11 +62,40 @@ pub(crate) fn cursor_to_proto(value: &MessageCursor) -> proto::MessageCursor {
     }
 }
 
+pub(crate) fn session_ref_to_proto(value: &SessionRef) -> proto::SessionRef {
+    proto::SessionRef {
+        serving_node_id: value.serving_node_id,
+        session_id: value.session_id.clone(),
+    }
+}
+
 pub(crate) fn user_ref_from_proto(value: Option<&proto::UserRef>) -> UserRef {
     value.map_or_else(UserRef::default, |value| UserRef {
         node_id: value.node_id,
         user_id: value.user_id,
     })
+}
+
+pub(crate) fn session_ref_from_proto(value: Option<&proto::SessionRef>) -> Result<SessionRef> {
+    let value = value.ok_or_else(|| Error::protocol("missing session_ref"))?;
+    if value.serving_node_id <= 0 {
+        return Err(Error::protocol("invalid session_ref.serving_node_id"));
+    }
+    if value.session_id.is_empty() {
+        return Err(Error::protocol("invalid session_ref.session_id"));
+    }
+    Ok(SessionRef {
+        serving_node_id: value.serving_node_id,
+        session_id: value.session_id.clone(),
+    })
+}
+
+pub(crate) fn optional_session_ref_from_proto(
+    value: Option<&proto::SessionRef>,
+) -> Result<Option<SessionRef>> {
+    value
+        .map(|value| session_ref_from_proto(Some(value)))
+        .transpose()
 }
 
 pub(crate) fn user_from_proto(value: Option<&proto::User>) -> Result<User> {
@@ -106,6 +135,7 @@ pub(crate) fn packet_from_proto(value: Option<&proto::Packet>) -> Result<Packet>
         sender: user_ref_from_proto(value.sender.as_ref()),
         body: value.body.to_vec(),
         delivery_mode: delivery_mode_from_proto(value.delivery_mode),
+        target_session: optional_session_ref_from_proto(value.target_session.as_ref())?,
     })
 }
 
@@ -119,6 +149,45 @@ pub(crate) fn relay_accepted_from_proto(
         target_node_id: value.target_node_id,
         recipient: user_ref_from_proto(value.recipient.as_ref()),
         delivery_mode: delivery_mode_from_proto(value.delivery_mode),
+        target_session: optional_session_ref_from_proto(value.target_session.as_ref())?,
+    })
+}
+
+pub(crate) fn online_node_presence_from_proto(
+    value: &proto::OnlineNodePresence,
+) -> OnlineNodePresence {
+    OnlineNodePresence {
+        serving_node_id: value.serving_node_id,
+        session_count: value.session_count,
+        transport_hint: value.transport_hint.clone(),
+    }
+}
+
+pub(crate) fn resolved_session_from_proto(
+    value: &proto::ResolvedSession,
+) -> Result<ResolvedSession> {
+    Ok(ResolvedSession {
+        session: session_ref_from_proto(value.session.as_ref())?,
+        transport: value.transport.clone(),
+        transient_capable: value.transient_capable,
+    })
+}
+
+pub(crate) fn resolved_user_sessions_from_proto(
+    value: &proto::ResolveUserSessionsResponse,
+) -> Result<ResolvedUserSessions> {
+    Ok(ResolvedUserSessions {
+        user: user_ref_from_proto(value.user.as_ref()),
+        presence: value
+            .presence
+            .iter()
+            .map(online_node_presence_from_proto)
+            .collect(),
+        sessions: value
+            .items
+            .iter()
+            .map(resolved_session_from_proto)
+            .collect::<Result<Vec<_>>>()?,
     })
 }
 
@@ -309,6 +378,7 @@ pub(crate) fn login_info_from_proto(value: &proto::LoginResponse) -> Result<Logi
     Ok(LoginInfo {
         user: user_from_proto(value.user.as_ref())?,
         protocol_version: value.protocol_version.clone(),
+        session_ref: session_ref_from_proto(value.session_ref.as_ref())?,
     })
 }
 
@@ -363,6 +433,7 @@ pub(crate) fn relay_accepted_from_http(value: &Map<String, Value>) -> Result<Rel
         target_node_id: int_value(value.get("target_node_id")),
         recipient: user_ref_from_http(value.get("recipient")),
         delivery_mode: delivery_mode_from_http(value.get("delivery_mode")),
+        target_session: None,
     })
 }
 

@@ -334,10 +334,14 @@ async fn http_client_requests_and_encoding() {
                 200,
             ),
             ("GET", "/cluster/nodes/4096/logged-in-users") => HttpTestResponse::json(
-                json!([
-                    { "node_id": 4096, "user_id": 1025, "username": "alice" },
-                    { "node_id": 4096, "user_id": 1026, "username": "bob" }
-                ]),
+                json!({
+                    "target_node_id": 4096,
+                    "items": [
+                        { "node_id": 4096, "user_id": 1025, "username": "alice" },
+                        { "node_id": 4096, "user_id": 1026, "username": "bob" }
+                    ],
+                    "count": 2
+                }),
                 200,
             ),
             ("PUT", "/nodes/4096/users/1025/attachments/user_blacklist/4096/1027") => {

@@ -22,6 +22,7 @@ pub use store::{BoxError, CursorStore, MemoryCursorStore};
 pub use types::{
     Attachment, AttachmentType, BlacklistEntry, ClusterNode, CreateUserRequest, Credentials,
     DeleteUserResult, DeliveryMode, Event, EventLogTrimStatus, LoggedInUser, LoginInfo, Message,
-    MessageCursor, MessageTrimStatus, OperationsStatus, Packet, PeerOriginStatus, PeerStatus,
-    ProjectionStatus, RelayAccepted, Subscription, UpdateUserRequest, User, UserRef,
+    MessageCursor, MessageTrimStatus, OnlineNodePresence, OperationsStatus, Packet,
+    PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted, ResolvedSession,
+    ResolvedUserSessions, SessionRef, Subscription, UpdateUserRequest, User, UserRef,
 };

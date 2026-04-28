@@ -6,6 +6,7 @@
 - WebSocket + Protobuf 长连接客户端
 - 自动重连、重登录与 `seen_messages` 回放去重
 - `save_message -> save_cursor -> ack` 的可靠消息处理流程
+- `session_ref`、`resolve_user_sessions` 与按会话定向的 transient packet
 - Rust 风格的广播事件流订阅接口
 
 首版不实现 ZeroMQ，也不公开底层 protobuf 类型。
@@ -67,7 +68,11 @@ async fn main() -> Result<(), turntf::Error> {
     client.connect().await?;
 
     if let Some(Ok(ClientEvent::Login(info))) = events.next().await {
-        println!("login ok: {}", info.protocol_version);
+        println!(
+            "login ok: {} ({})",
+            info.protocol_version,
+            info.session_ref.session_id
+        );
     }
 
     client
@@ -81,6 +86,35 @@ async fn main() -> Result<(), turntf::Error> {
         .await?;
 
     client.close().await?;
+    Ok(())
+}
+```
+
+## 会话定向瞬时包
+
+```rust
+use turntf::{DeliveryMode, SessionRef, UserRef};
+
+async fn send_targeted_packet(
+    client: &turntf::Client,
+    target: UserRef,
+) -> Result<(), turntf::Error> {
+    let resolved = client.resolve_user_sessions(target.clone()).await?;
+    let session: SessionRef = resolved
+        .sessions
+        .first()
+        .ok_or_else(|| turntf::Error::protocol("target user is offline"))?
+        .session
+        .clone();
+
+    client
+        .send_packet_to_session(
+            target,
+            b"hello session".to_vec(),
+            DeliveryMode::BestEffort,
+            session,
+        )
+        .await?;
     Ok(())
 }
 ```

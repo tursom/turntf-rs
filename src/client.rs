@@ -24,7 +24,8 @@ use crate::mapping::{
     cluster_node_from_proto, cursor_to_proto, delivery_mode_to_proto, event_from_proto,
     logged_in_user_from_proto, login_info_from_proto, message_from_proto,
     operations_status_from_proto, packet_from_proto, relay_accepted_from_proto,
-    subscription_from_attachment, user_from_proto, user_ref_to_proto,
+    resolved_user_sessions_from_proto, session_ref_to_proto, subscription_from_attachment,
+    user_from_proto, user_ref_to_proto,
 };
 use crate::password::PasswordInput;
 use crate::proto;
@@ -32,10 +33,12 @@ use crate::store::CursorStore;
 use crate::types::{
     default_cursor_store, Attachment, AttachmentType, BlacklistEntry, ClientConfigDefaults,
     ClusterNode, CreateUserRequest, Credentials, DeleteUserResult, DeliveryMode, Event,
-    LoggedInUser, LoginInfo, Message, OperationsStatus, RelayAccepted, Subscription,
-    UpdateUserRequest, User, UserRef,
+    LoggedInUser, LoginInfo, Message, OperationsStatus, RelayAccepted, ResolvedUserSessions,
+    SessionRef, Subscription, UpdateUserRequest, User, UserRef,
 };
-use crate::validation::{validate_delivery_mode, validate_positive_i64, validate_user_ref};
+use crate::validation::{
+    validate_delivery_mode, validate_positive_i64, validate_session_ref, validate_user_ref,
+};
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type WsWriter = SplitSink<WsStream, WsMessage>;
@@ -141,6 +144,7 @@ enum RpcValue {
     Events(Vec<Event>),
     ClusterNodes(Vec<ClusterNode>),
     LoggedInUsers(Vec<LoggedInUser>),
+    ResolvedUserSessions(ResolvedUserSessions),
     OperationsStatus(OperationsStatus),
     Metrics(String),
 }
@@ -307,6 +311,7 @@ impl Client {
                         delivery_kind: 0,
                         delivery_mode: 0,
                         sync_mode: 0,
+                        target_session: None,
                     },
                 )),
             })
@@ -327,8 +332,33 @@ impl Client {
         body: Vec<u8>,
         delivery_mode: DeliveryMode,
     ) -> Result<RelayAccepted> {
+        self.send_packet_inner(target, body, delivery_mode, None)
+            .await
+    }
+
+    pub async fn send_packet_to_session(
+        &self,
+        target: UserRef,
+        body: Vec<u8>,
+        delivery_mode: DeliveryMode,
+        target_session: SessionRef,
+    ) -> Result<RelayAccepted> {
+        self.send_packet_inner(target, body, delivery_mode, Some(target_session))
+            .await
+    }
+
+    async fn send_packet_inner(
+        &self,
+        target: UserRef,
+        body: Vec<u8>,
+        delivery_mode: DeliveryMode,
+        target_session: Option<SessionRef>,
+    ) -> Result<RelayAccepted> {
         validate_user_ref(&target, "target")?;
         validate_delivery_mode(delivery_mode)?;
+        if let Some(target_session) = target_session.as_ref() {
+            validate_session_ref(target_session, "target_session")?;
+        }
         if body.is_empty() {
             return Err(Error::validation("body is required"));
         }
@@ -342,6 +372,7 @@ impl Client {
                         delivery_kind: proto::ClientDeliveryKind::Transient as i32,
                         delivery_mode: delivery_mode_to_proto(delivery_mode),
                         sync_mode: 0,
+                        target_session: target_session.as_ref().map(session_ref_to_proto),
                     },
                 )),
             })
@@ -361,6 +392,17 @@ impl Client {
         delivery_mode: DeliveryMode,
     ) -> Result<RelayAccepted> {
         self.send_packet(target, body, delivery_mode).await
+    }
+
+    pub async fn post_packet_to_session(
+        &self,
+        target: UserRef,
+        body: Vec<u8>,
+        delivery_mode: DeliveryMode,
+        target_session: SessionRef,
+    ) -> Result<RelayAccepted> {
+        self.send_packet_to_session(target, body, delivery_mode, target_session)
+            .await
     }
 
     pub async fn create_user(&self, request: CreateUserRequest) -> Result<User> {
@@ -695,6 +737,26 @@ impl Client {
         }
     }
 
+    pub async fn resolve_user_sessions(&self, user: UserRef) -> Result<ResolvedUserSessions> {
+        validate_user_ref(&user, "user")?;
+        match self
+            .rpc(move |request_id| proto::ClientEnvelope {
+                body: Some(proto::client_envelope::Body::ResolveUserSessions(
+                    proto::ResolveUserSessionsRequest {
+                        request_id,
+                        user: Some(user_ref_to_proto(&user)),
+                    },
+                )),
+            })
+            .await?
+        {
+            RpcValue::ResolvedUserSessions(result) => Ok(result),
+            _ => Err(Error::protocol(
+                "missing result in resolve_user_sessions_response",
+            )),
+        }
+    }
+
     pub async fn operations_status(&self) -> Result<OperationsStatus> {
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
@@ -999,6 +1061,15 @@ impl Inner {
                     Ok(RpcValue::LoggedInUsers(logged_in_users_from_proto(
                         &response.items,
                     )?)),
+                )
+                .await;
+            }
+            Some(proto::server_envelope::Body::ResolveUserSessionsResponse(response)) => {
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::ResolvedUserSessions(
+                        resolved_user_sessions_from_proto(&response)?,
+                    )),
                 )
                 .await;
             }

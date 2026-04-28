@@ -14,7 +14,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use turntf::{
     plain_password, Client, ClientEvent, Config, CreateUserRequest, CursorStore, DeliveryMode,
-    MemoryCursorStore, Message, MessageCursor,
+    MemoryCursorStore, Message, MessageCursor, SessionRef,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -75,6 +75,16 @@ struct LoginResponseProto {
     user: Option<UserProto>,
     #[prost(string, tag = "2")]
     protocol_version: String,
+    #[prost(message, optional, tag = "3")]
+    session_ref: Option<SessionRefProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct SessionRefProto {
+    #[prost(int64, tag = "1")]
+    serving_node_id: i64,
+    #[prost(string, tag = "2")]
+    session_id: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -109,6 +119,8 @@ struct PacketProto {
     body: Vec<u8>,
     #[prost(int32, tag = "7")]
     delivery_mode: i32,
+    #[prost(message, optional, tag = "8")]
+    target_session: Option<SessionRefProto>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -135,6 +147,8 @@ struct TransientAcceptedProto {
     recipient: Option<UserRefProto>,
     #[prost(int32, tag = "5")]
     delivery_mode: i32,
+    #[prost(message, optional, tag = "6")]
+    target_session: Option<SessionRefProto>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -151,6 +165,50 @@ struct SendMessageRequestProto {
     delivery_mode: i32,
     #[prost(int32, tag = "6")]
     sync_mode: i32,
+    #[prost(message, optional, tag = "7")]
+    target_session: Option<SessionRefProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct OnlineNodePresenceProto {
+    #[prost(int64, tag = "1")]
+    serving_node_id: i64,
+    #[prost(int32, tag = "2")]
+    session_count: i32,
+    #[prost(string, tag = "3")]
+    transport_hint: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ResolvedSessionProto {
+    #[prost(message, optional, tag = "1")]
+    session: Option<SessionRefProto>,
+    #[prost(string, tag = "2")]
+    transport: String,
+    #[prost(bool, tag = "3")]
+    transient_capable: bool,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ResolveUserSessionsRequestProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    user: Option<UserRefProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ResolveUserSessionsResponseProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    user: Option<UserRefProto>,
+    #[prost(message, repeated, tag = "3")]
+    presence: Vec<OnlineNodePresenceProto>,
+    #[prost(message, repeated, tag = "4")]
+    items: Vec<ResolvedSessionProto>,
+    #[prost(int32, tag = "5")]
+    count: i32,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -223,7 +281,7 @@ struct CreateUserResponseProto {
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ClientEnvelopeProto {
-    #[prost(oneof = "client_envelope_proto::Body", tags = "1, 2, 3, 4, 5")]
+    #[prost(oneof = "client_envelope_proto::Body", tags = "1, 2, 3, 4, 5, 18")]
     body: Option<client_envelope_proto::Body>,
 }
 
@@ -240,12 +298,17 @@ mod client_envelope_proto {
         Ping(super::PingProto),
         #[prost(message, tag = "5")]
         CreateUser(super::CreateUserRequestProto),
+        #[prost(message, tag = "18")]
+        ResolveUserSessions(super::ResolveUserSessionsRequestProto),
     }
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ServerEnvelopeProto {
-    #[prost(oneof = "server_envelope_proto::Body", tags = "1, 2, 3, 4, 5, 6, 7")]
+    #[prost(
+        oneof = "server_envelope_proto::Body",
+        tags = "1, 2, 3, 4, 5, 6, 7, 20"
+    )]
     body: Option<server_envelope_proto::Body>,
 }
 
@@ -266,6 +329,8 @@ mod server_envelope_proto {
         PacketPushed(super::PacketPushedProto),
         #[prost(message, tag = "7")]
         CreateUserResponse(super::CreateUserResponseProto),
+        #[prost(message, tag = "20")]
+        ResolveUserSessionsResponse(super::ResolveUserSessionsResponseProto),
     }
 }
 
@@ -363,6 +428,13 @@ fn user_ref(node_id: i64, user_id: i64) -> UserRefProto {
     UserRefProto { node_id, user_id }
 }
 
+fn session_ref(session_id: &str) -> SessionRefProto {
+    SessionRefProto {
+        serving_node_id: 4096,
+        session_id: session_id.to_owned(),
+    }
+}
+
 fn message_proto(seq: i64) -> MessageProto {
     MessageProto {
         recipient: Some(user_ref(4096, 1025)),
@@ -413,6 +485,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
                             origin_node_id: 4096,
                         }),
                         protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("session-main")),
                     },
                 )),
             },
@@ -452,6 +525,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
                             sender: Some(user_ref(4096, 1)),
                             body: b"pkt".to_vec(),
                             delivery_mode: 1,
+                            target_session: None,
                         }),
                     },
                 )),
@@ -486,6 +560,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
         };
         assert_eq!(send_packet.delivery_kind, 2);
         assert_eq!(send_packet.delivery_mode, 2);
+        assert!(send_packet.target_session.is_none());
         send_server_envelope(
             &mut ws,
             ServerEnvelopeProto {
@@ -499,6 +574,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
                                 target_node_id: 8192,
                                 recipient: Some(user_ref(8192, 1025)),
                                 delivery_mode: 2,
+                                target_session: None,
                             },
                         )),
                     },
@@ -575,9 +651,10 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
 
     client.connect().await.unwrap();
 
+    let login_event = next_event(&mut events).await.unwrap();
     assert!(matches!(
-        next_event(&mut events).await.unwrap(),
-        ClientEvent::Login(_)
+        login_event,
+        ClientEvent::Login(ref info) if info.session_ref.session_id == "session-main"
     ));
     assert!(
         matches!(next_event(&mut events).await.unwrap(), ClientEvent::Message(message) if message.seq == 7)
@@ -634,6 +711,195 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
 }
 
 #[tokio::test]
+async fn client_resolves_sessions_and_targets_transient_delivery() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let paths = Arc::new(StdMutex::new(Vec::new()));
+    let paths_for_server = Arc::clone(&paths);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener, paths_for_server).await;
+        let login = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::Login(_) = login.body.unwrap() else {
+            panic!("expected login request");
+        };
+
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("login-session")),
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let resolve = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::ResolveUserSessions(resolve) = resolve.body.unwrap()
+        else {
+            panic!("expected resolve_user_sessions request");
+        };
+        assert_eq!(resolve.request_id, 1);
+        assert_eq!(resolve.user, Some(user_ref(4096, 1025)));
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::ResolveUserSessionsResponse(
+                    ResolveUserSessionsResponseProto {
+                        request_id: resolve.request_id,
+                        user: Some(user_ref(4096, 1025)),
+                        presence: vec![OnlineNodePresenceProto {
+                            serving_node_id: 4096,
+                            session_count: 1,
+                            transport_hint: "ws".into(),
+                        }],
+                        items: vec![ResolvedSessionProto {
+                            session: Some(session_ref("target-session")),
+                            transport: "ws".into(),
+                            transient_capable: true,
+                        }],
+                        count: 1,
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let send_packet = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::SendMessage(send_packet) = send_packet.body.unwrap()
+        else {
+            panic!("expected targeted transient send_message request");
+        };
+        assert_eq!(send_packet.request_id, 2);
+        assert_eq!(send_packet.delivery_kind, 2);
+        assert_eq!(send_packet.delivery_mode, 1);
+        let target_session = send_packet.target_session.expect("target_session");
+        assert_eq!(target_session.session_id, "target-session");
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::SendMessageResponse(
+                    SendMessageResponseProto {
+                        request_id: send_packet.request_id,
+                        body: Some(send_message_response_proto::Body::TransientAccepted(
+                            TransientAcceptedProto {
+                                packet_id: 88,
+                                source_node_id: 4096,
+                                target_node_id: 4096,
+                                recipient: Some(user_ref(4096, 1025)),
+                                delivery_mode: 1,
+                                target_session: Some(session_ref("target-session")),
+                            },
+                        )),
+                    },
+                )),
+            },
+        )
+        .await;
+
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::PacketPushed(
+                    PacketPushedProto {
+                        packet: Some(PacketProto {
+                            packet_id: 88,
+                            source_node_id: 4096,
+                            target_node_id: 4096,
+                            recipient: Some(user_ref(4096, 1025)),
+                            sender: Some(user_ref(4096, 1)),
+                            body: b"targeted".to_vec(),
+                            delivery_mode: 1,
+                            target_session: Some(session_ref("target-session")),
+                        }),
+                    },
+                )),
+            },
+        )
+        .await;
+    });
+
+    let mut config = Config::new(
+        format!("http://{address}"),
+        turntf::Credentials {
+            node_id: 4096,
+            user_id: 1025,
+            password: plain_password("alice-password").unwrap(),
+        },
+    );
+    config.ping_interval = Duration::from_secs(3600);
+    let client = Client::new(config).unwrap();
+    let mut events = client.subscribe().await;
+
+    client.connect().await.unwrap();
+
+    let login_info = match next_event(&mut events).await.unwrap() {
+        ClientEvent::Login(info) => info,
+        other => panic!("expected login event, got {other:?}"),
+    };
+    assert_eq!(login_info.session_ref.session_id, "login-session");
+
+    let resolved = client
+        .resolve_user_sessions(turntf::UserRef {
+            node_id: 4096,
+            user_id: 1025,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resolved.user.node_id, 4096);
+    assert_eq!(resolved.user.user_id, 1025);
+    assert_eq!(resolved.presence.len(), 1);
+    assert_eq!(resolved.presence[0].session_count, 1);
+    let target_session = SessionRef {
+        serving_node_id: 4096,
+        session_id: "target-session".into(),
+    };
+    assert_eq!(resolved.sessions.len(), 1);
+    assert_eq!(resolved.sessions[0].session, target_session);
+    assert_eq!(resolved.sessions[0].transport, "ws");
+    assert!(resolved.sessions[0].transient_capable);
+
+    let accepted = client
+        .send_packet_to_session(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            b"targeted".to_vec(),
+            DeliveryMode::BestEffort,
+            target_session.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.packet_id, 88);
+    assert_eq!(accepted.target_session, Some(target_session.clone()));
+
+    let packet = match next_event(&mut events).await.unwrap() {
+        ClientEvent::Packet(packet) => packet,
+        other => panic!("expected packet event, got {other:?}"),
+    };
+    assert_eq!(packet.packet_id, 88);
+    assert_eq!(packet.target_session, Some(target_session));
+
+    client.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn client_reconnects_with_seen_messages_and_realtime_path() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -666,6 +932,7 @@ async fn client_reconnects_with_seen_messages_and_realtime_path() {
                             origin_node_id: 4096,
                         }),
                         protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("reconnect-first")),
                     },
                 )),
             },
@@ -716,6 +983,7 @@ async fn client_reconnects_with_seen_messages_and_realtime_path() {
                             origin_node_id: 4096,
                         }),
                         protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("reconnect-second")),
                     },
                 )),
             },
@@ -788,6 +1056,7 @@ async fn client_does_not_ack_on_persist_failure_and_emits_error() {
                             origin_node_id: 4096,
                         }),
                         protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("persist-failure")),
                     },
                 )),
             },
@@ -867,6 +1136,7 @@ async fn client_subscription_reports_lagged_and_closes() {
                             origin_node_id: 4096,
                         }),
                         protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("lagged-subscription")),
                     },
                 )),
             },
@@ -887,6 +1157,7 @@ async fn client_subscription_reports_lagged_and_closes() {
                                 sender: Some(user_ref(4096, 1)),
                                 body: b"pkt".to_vec(),
                                 delivery_mode: 1,
+                                target_session: None,
                             }),
                         },
                     )),

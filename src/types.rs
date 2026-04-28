@@ -24,6 +24,12 @@ pub struct MessageCursor {
     pub seq: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionRef {
+    pub serving_node_id: i64,
+    pub session_id: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeliveryMode {
     #[default]
@@ -103,6 +109,7 @@ pub struct Packet {
     pub sender: UserRef,
     pub body: Vec<u8>,
     pub delivery_mode: DeliveryMode,
+    pub target_session: Option<SessionRef>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +119,7 @@ pub struct RelayAccepted {
     pub target_node_id: i64,
     pub recipient: UserRef,
     pub delivery_mode: DeliveryMode,
+    pub target_session: Option<SessionRef>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +177,27 @@ pub struct LoggedInUser {
     pub node_id: i64,
     pub user_id: i64,
     pub username: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnlineNodePresence {
+    pub serving_node_id: i64,
+    pub session_count: i32,
+    pub transport_hint: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSession {
+    pub session: SessionRef,
+    pub transport: String,
+    pub transient_capable: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedUserSessions {
+    pub user: UserRef,
+    pub presence: Vec<OnlineNodePresence>,
+    pub sessions: Vec<ResolvedSession>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +278,7 @@ pub struct DeleteUserResult {
 pub struct LoginInfo {
     pub user: User,
     pub protocol_version: String,
+    pub session_ref: SessionRef,
 }
 
 #[derive(Clone, Debug, Default)]
