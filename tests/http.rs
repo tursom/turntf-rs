@@ -9,7 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use turntf::{
-    plain_password, CreateUserRequest, DeliveryMode, HttpClient, UpdateUserRequest, UserRef,
+    plain_password, CreateUserRequest, DeliveryMode, HttpClient, ScanUserMetadataRequest,
+    UpdateUserRequest, UpsertUserMetadataRequest, UserRef,
 };
 
 #[derive(Debug)]
@@ -225,6 +226,72 @@ async fn http_client_requests_and_encoding() {
             }
             ("DELETE", "/nodes/4096/users/1025") => HttpTestResponse::json(
                 json!({ "status": "deleted", "node_id": 4096, "user_id": 1025 }),
+                200,
+            ),
+            ("PUT", "/nodes/4096/users/1025/metadata/session:web:1") => {
+                let encoded = STANDARD.encode([0xde, 0xad, 0xbe]);
+                assert_eq!(
+                    body.get("value").and_then(Value::as_str),
+                    Some(encoded.as_str())
+                );
+                assert_eq!(
+                    body.get("expires_at").and_then(Value::as_str),
+                    Some("2026-05-01T12:00:00Z")
+                );
+                HttpTestResponse::json(
+                    json!({
+                        "owner": { "node_id": 4096, "user_id": 1025 },
+                        "key": "session:web:1",
+                        "value": encoded,
+                        "updated_at": "hlc-meta-upsert",
+                        "expires_at": "2026-05-01T12:00:00Z",
+                        "origin_node_id": 4096
+                    }),
+                    201,
+                )
+            }
+            ("GET", "/nodes/4096/users/1025/metadata/session:web:1") => HttpTestResponse::json(
+                json!({
+                    "owner": { "node_id": 4096, "user_id": 1025 },
+                    "key": "session:web:1",
+                    "value": STANDARD.encode([0xde, 0xad, 0xbe]),
+                    "updated_at": "hlc-meta-get",
+                    "expires_at": "2026-05-01T12:00:00Z",
+                    "origin_node_id": 4096
+                }),
+                200,
+            ),
+            ("GET", path)
+                if path == "/nodes/4096/users/1025/metadata?prefix=session:&after=session:web:0&limit=1"
+                    || path
+                        == "/nodes/4096/users/1025/metadata?prefix=session%3A&after=session%3Aweb%3A0&limit=1" =>
+            {
+                HttpTestResponse::json(
+                    json!({
+                        "items": [{
+                            "owner": { "node_id": 4096, "user_id": 1025 },
+                            "key": "session:web:1",
+                            "value": STANDARD.encode([0xde, 0xad, 0xbe]),
+                            "updated_at": "hlc-meta-scan",
+                            "expires_at": "2026-05-01T12:00:00Z",
+                            "origin_node_id": 4096
+                        }],
+                        "count": 1,
+                        "next_after": "session:web:1"
+                    }),
+                    200,
+                )
+            }
+            ("DELETE", "/nodes/4096/users/1025/metadata/session:web:1") => HttpTestResponse::json(
+                json!({
+                    "owner": { "node_id": 4096, "user_id": 1025 },
+                    "key": "session:web:1",
+                    "value": STANDARD.encode([0xde, 0xad, 0xbe]),
+                    "updated_at": "hlc-meta-upsert",
+                    "deleted_at": "hlc-meta-deleted",
+                    "expires_at": "2026-05-01T12:00:00Z",
+                    "origin_node_id": 4096
+                }),
                 200,
             ),
             ("PUT", "/nodes/4096/users/1025/attachments/channel_subscription/4096/2025") => {
@@ -499,6 +566,69 @@ async fn http_client_requests_and_encoding() {
     assert_eq!(updated.username, "alice-2");
     assert_eq!(updated.profile_json, br#"{"tier":"platinum"}"#);
 
+    let metadata = client
+        .upsert_user_metadata(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            "session:web:1",
+            UpsertUserMetadataRequest {
+                value: vec![0xde, 0xad, 0xbe],
+                expires_at: Some("2026-05-01T12:00:00Z".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(metadata.value, vec![0xde, 0xad, 0xbe]);
+    assert_eq!(metadata.expires_at, "2026-05-01T12:00:00Z");
+
+    let loaded_metadata = client
+        .get_user_metadata(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            "session:web:1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded_metadata.updated_at, "hlc-meta-get");
+
+    let scanned_metadata = client
+        .scan_user_metadata(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            ScanUserMetadataRequest {
+                prefix: "session:".into(),
+                after: "session:web:0".into(),
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanned_metadata.count, 1);
+    assert_eq!(scanned_metadata.next_after, "session:web:1");
+    assert_eq!(scanned_metadata.items[0].key, "session:web:1");
+
+    let deleted_metadata = client
+        .delete_user_metadata(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            "session:web:1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted_metadata.deleted_at, "hlc-meta-deleted");
+
     let subscription = client
         .create_subscription(
             &token,
@@ -691,6 +821,36 @@ async fn http_client_maps_server_errors_and_validates_node_id() {
     let client = HttpClient::new(base_url).unwrap();
     let error = client
         .list_node_logged_in_users("token", 0)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
+
+    let error = client
+        .get_user_metadata(
+            "token",
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            "bad/key",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
+
+    let error = client
+        .scan_user_metadata(
+            "token",
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            ScanUserMetadataRequest {
+                prefix: String::new(),
+                after: String::new(),
+                limit: -1,
+            },
+        )
         .await
         .unwrap_err();
     assert!(matches!(error, turntf::Error::Validation(_)));

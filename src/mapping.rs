@@ -8,7 +8,8 @@ use crate::types::{
     Attachment, AttachmentType, BlacklistEntry, ClusterNode, DeleteUserResult, DeliveryMode, Event,
     EventLogTrimStatus, LoggedInUser, LoginInfo, Message, MessageCursor, MessageTrimStatus,
     OnlineNodePresence, OperationsStatus, Packet, PeerOriginStatus, PeerStatus, ProjectionStatus,
-    RelayAccepted, ResolvedSession, ResolvedUserSessions, SessionRef, Subscription, User, UserRef,
+    RelayAccepted, ResolvedSession, ResolvedUserSessions, SessionRef, Subscription, User,
+    UserMetadata, UserMetadataScanResult, UserRef,
 };
 
 pub(crate) fn delivery_mode_to_proto(mode: DeliveryMode) -> i32 {
@@ -110,6 +111,35 @@ pub(crate) fn user_from_proto(value: Option<&proto::User>) -> Result<User> {
         created_at: value.created_at.clone(),
         updated_at: value.updated_at.clone(),
         origin_node_id: value.origin_node_id,
+    })
+}
+
+pub(crate) fn user_metadata_from_proto(
+    value: Option<&proto::UserMetadata>,
+) -> Result<UserMetadata> {
+    let value = value.ok_or_else(|| Error::protocol("missing user_metadata"))?;
+    Ok(UserMetadata {
+        owner: user_ref_from_proto(value.owner.as_ref()),
+        key: value.key.clone(),
+        value: value.value.to_vec(),
+        updated_at: value.updated_at.clone(),
+        deleted_at: value.deleted_at.clone(),
+        expires_at: value.expires_at.clone(),
+        origin_node_id: value.origin_node_id,
+    })
+}
+
+pub(crate) fn user_metadata_scan_result_from_proto(
+    value: &proto::ScanUserMetadataResponse,
+) -> Result<UserMetadataScanResult> {
+    Ok(UserMetadataScanResult {
+        items: value
+            .items
+            .iter()
+            .map(|item| user_metadata_from_proto(Some(item)))
+            .collect::<Result<Vec<_>>>()?,
+        count: value.count,
+        next_after: value.next_after.clone(),
     })
 }
 
@@ -407,6 +437,40 @@ pub(crate) fn user_from_http(value: &Map<String, Value>) -> Result<User> {
     })
 }
 
+pub(crate) fn user_metadata_from_http(value: &Map<String, Value>) -> Result<UserMetadata> {
+    Ok(UserMetadata {
+        owner: user_ref_from_http(value.get("owner")),
+        key: str_value(value.get("key")),
+        value: base64_to_bytes_field(value.get("value"), "value")?,
+        updated_at: str_value(value.get("updated_at")),
+        deleted_at: str_value(value.get("deleted_at")),
+        expires_at: str_value(value.get("expires_at")),
+        origin_node_id: int_value(value.get("origin_node_id")),
+    })
+}
+
+pub(crate) fn user_metadata_scan_result_from_http(
+    value: &Map<String, Value>,
+) -> Result<UserMetadataScanResult> {
+    let Some(Value::Array(items)) = value.get("items") else {
+        return Err(Error::protocol(
+            "missing items in scan_user_metadata response",
+        ));
+    };
+    Ok(UserMetadataScanResult {
+        items: items
+            .iter()
+            .map(expect_object)
+            .map(|item| item.and_then(user_metadata_from_http))
+            .collect::<Result<Vec<_>>>()?,
+        count: value.get("count").map_or_else(
+            || i32::try_from(items.len()).unwrap_or(i32::MAX),
+            |count| i32_value(Some(count)),
+        ),
+        next_after: str_value(value.get("next_after")),
+    })
+}
+
 pub(crate) fn message_from_http(value: &Map<String, Value>) -> Result<Message> {
     let created_at_hlc = {
         let created_at_hlc = str_value(value.get("created_at_hlc"));
@@ -649,12 +713,16 @@ fn json_value_to_bytes(value: Option<&Value>) -> Result<Vec<u8>> {
 }
 
 fn base64_to_bytes(value: Option<&Value>) -> Result<Vec<u8>> {
+    base64_to_bytes_field(value, "body")
+}
+
+fn base64_to_bytes_field(value: Option<&Value>, field: &str) -> Result<Vec<u8>> {
     match value {
         None | Some(Value::Null) => Ok(Vec::new()),
         Some(Value::String(value)) => STANDARD
             .decode(value)
-            .map_err(|err| Error::protocol(format!("invalid base64 body: {err}"))),
-        _ => Err(Error::protocol("invalid base64 body")),
+            .map_err(|err| Error::protocol(format!("invalid base64 {field}: {err}"))),
+        _ => Err(Error::protocol(format!("invalid base64 {field}"))),
     }
 }
 

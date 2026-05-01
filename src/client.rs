@@ -25,7 +25,8 @@ use crate::mapping::{
     logged_in_user_from_proto, login_info_from_proto, message_from_proto,
     operations_status_from_proto, packet_from_proto, relay_accepted_from_proto,
     resolved_user_sessions_from_proto, session_ref_to_proto, subscription_from_attachment,
-    user_from_proto, user_ref_to_proto,
+    user_from_proto, user_metadata_from_proto, user_metadata_scan_result_from_proto,
+    user_ref_to_proto,
 };
 use crate::password::PasswordInput;
 use crate::proto;
@@ -34,10 +35,13 @@ use crate::types::{
     default_cursor_store, Attachment, AttachmentType, BlacklistEntry, ClientConfigDefaults,
     ClusterNode, CreateUserRequest, Credentials, DeleteUserResult, DeliveryMode, Event,
     LoggedInUser, LoginInfo, Message, OperationsStatus, RelayAccepted, ResolvedUserSessions,
-    SessionRef, Subscription, UpdateUserRequest, User, UserRef,
+    ScanUserMetadataRequest, SessionRef, Subscription, UpdateUserRequest,
+    UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult, UserRef,
 };
 use crate::validation::{
-    validate_delivery_mode, validate_positive_i64, validate_session_ref, validate_user_ref,
+    validate_delivery_mode, validate_optional_user_metadata_key_fragment, validate_positive_i64,
+    validate_session_ref, validate_user_metadata_key, validate_user_metadata_scan_limit,
+    validate_user_ref,
 };
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -138,6 +142,8 @@ enum RpcValue {
     RelayAccepted(RelayAccepted),
     User(User),
     DeleteUserResult(DeleteUserResult),
+    UserMetadata(UserMetadata),
+    UserMetadataScanResult(UserMetadataScanResult),
     Attachment(Attachment),
     Attachments(Vec<Attachment>),
     Messages(Vec<Message>),
@@ -506,6 +512,120 @@ impl Client {
         {
             RpcValue::DeleteUserResult(result) => Ok(result),
             _ => Err(Error::protocol("missing status in delete_user_response")),
+        }
+    }
+
+    pub async fn get_user_metadata(
+        &self,
+        owner: UserRef,
+        key: impl Into<String>,
+    ) -> Result<UserMetadata> {
+        validate_user_ref(&owner, "owner")?;
+        let key = key.into();
+        validate_user_metadata_key(&key, "key")?;
+        match self
+            .rpc(move |request_id| proto::ClientEnvelope {
+                body: Some(proto::client_envelope::Body::GetUserMetadata(
+                    proto::GetUserMetadataRequest {
+                        request_id,
+                        owner: Some(user_ref_to_proto(&owner)),
+                        key,
+                    },
+                )),
+            })
+            .await?
+        {
+            RpcValue::UserMetadata(metadata) => Ok(metadata),
+            _ => Err(Error::protocol(
+                "missing metadata in get_user_metadata_response",
+            )),
+        }
+    }
+
+    pub async fn upsert_user_metadata(
+        &self,
+        owner: UserRef,
+        key: impl Into<String>,
+        request: UpsertUserMetadataRequest,
+    ) -> Result<UserMetadata> {
+        validate_user_ref(&owner, "owner")?;
+        let key = key.into();
+        validate_user_metadata_key(&key, "key")?;
+        match self
+            .rpc(move |request_id| proto::ClientEnvelope {
+                body: Some(proto::client_envelope::Body::UpsertUserMetadata(
+                    proto::UpsertUserMetadataRequest {
+                        request_id,
+                        owner: Some(user_ref_to_proto(&owner)),
+                        key,
+                        value: request.value.into(),
+                        expires_at: request.expires_at.map(|value| proto::StringField { value }),
+                    },
+                )),
+            })
+            .await?
+        {
+            RpcValue::UserMetadata(metadata) => Ok(metadata),
+            _ => Err(Error::protocol(
+                "missing metadata in upsert_user_metadata_response",
+            )),
+        }
+    }
+
+    pub async fn delete_user_metadata(
+        &self,
+        owner: UserRef,
+        key: impl Into<String>,
+    ) -> Result<UserMetadata> {
+        validate_user_ref(&owner, "owner")?;
+        let key = key.into();
+        validate_user_metadata_key(&key, "key")?;
+        match self
+            .rpc(move |request_id| proto::ClientEnvelope {
+                body: Some(proto::client_envelope::Body::DeleteUserMetadata(
+                    proto::DeleteUserMetadataRequest {
+                        request_id,
+                        owner: Some(user_ref_to_proto(&owner)),
+                        key,
+                    },
+                )),
+            })
+            .await?
+        {
+            RpcValue::UserMetadata(metadata) => Ok(metadata),
+            _ => Err(Error::protocol(
+                "missing metadata in delete_user_metadata_response",
+            )),
+        }
+    }
+
+    pub async fn scan_user_metadata(
+        &self,
+        owner: UserRef,
+        request: ScanUserMetadataRequest,
+    ) -> Result<UserMetadataScanResult> {
+        validate_user_ref(&owner, "owner")?;
+        validate_optional_user_metadata_key_fragment(&request.prefix, "prefix")?;
+        validate_optional_user_metadata_key_fragment(&request.after, "after")?;
+        validate_user_metadata_scan_limit(request.limit)?;
+        match self
+            .rpc(move |request_id| proto::ClientEnvelope {
+                body: Some(proto::client_envelope::Body::ScanUserMetadata(
+                    proto::ScanUserMetadataRequest {
+                        request_id,
+                        owner: Some(user_ref_to_proto(&owner)),
+                        prefix: request.prefix,
+                        after: request.after,
+                        limit: request.limit,
+                    },
+                )),
+            })
+            .await?
+        {
+            RpcValue::UserMetadataScanResult(result) => Ok(result),
+            _ => Err(Error::protocol(
+                "missing items in scan_user_metadata_response",
+            )),
         }
     }
 
@@ -1002,6 +1122,42 @@ impl Inner {
                         status: response.status,
                         user: crate::mapping::user_ref_from_proto(response.user.as_ref()),
                     })),
+                )
+                .await;
+            }
+            Some(proto::server_envelope::Body::GetUserMetadataResponse(response)) => {
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::UserMetadata(user_metadata_from_proto(
+                        response.metadata.as_ref(),
+                    )?)),
+                )
+                .await;
+            }
+            Some(proto::server_envelope::Body::UpsertUserMetadataResponse(response)) => {
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::UserMetadata(user_metadata_from_proto(
+                        response.metadata.as_ref(),
+                    )?)),
+                )
+                .await;
+            }
+            Some(proto::server_envelope::Body::DeleteUserMetadataResponse(response)) => {
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::UserMetadata(user_metadata_from_proto(
+                        response.metadata.as_ref(),
+                    )?)),
+                )
+                .await;
+            }
+            Some(proto::server_envelope::Body::ScanUserMetadataResponse(response)) => {
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::UserMetadataScanResult(
+                        user_metadata_scan_result_from_proto(&response)?,
+                    )),
                 )
                 .await;
             }

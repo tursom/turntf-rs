@@ -14,7 +14,8 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use turntf::{
     plain_password, Client, ClientEvent, Config, CreateUserRequest, CursorStore, DeliveryMode,
-    MemoryCursorStore, Message, MessageCursor, SessionRef,
+    MemoryCursorStore, Message, MessageCursor, ScanUserMetadataRequest, SessionRef,
+    UpsertUserMetadataRequest,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -280,8 +281,119 @@ struct CreateUserResponseProto {
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
+struct StringFieldProto {
+    #[prost(string, tag = "1")]
+    value: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct UserMetadataProto {
+    #[prost(message, optional, tag = "1")]
+    owner: Option<UserRefProto>,
+    #[prost(string, tag = "2")]
+    key: String,
+    #[prost(bytes = "vec", tag = "3")]
+    value: Vec<u8>,
+    #[prost(string, tag = "4")]
+    updated_at: String,
+    #[prost(string, tag = "5")]
+    deleted_at: String,
+    #[prost(string, tag = "6")]
+    expires_at: String,
+    #[prost(int64, tag = "7")]
+    origin_node_id: i64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct GetUserMetadataRequestProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    owner: Option<UserRefProto>,
+    #[prost(string, tag = "3")]
+    key: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct UpsertUserMetadataRequestProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    owner: Option<UserRefProto>,
+    #[prost(string, tag = "3")]
+    key: String,
+    #[prost(bytes = "vec", tag = "4")]
+    value: Vec<u8>,
+    #[prost(message, optional, tag = "5")]
+    expires_at: Option<StringFieldProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct DeleteUserMetadataRequestProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    owner: Option<UserRefProto>,
+    #[prost(string, tag = "3")]
+    key: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ScanUserMetadataRequestProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    owner: Option<UserRefProto>,
+    #[prost(string, tag = "3")]
+    prefix: String,
+    #[prost(string, tag = "4")]
+    after: String,
+    #[prost(int32, tag = "5")]
+    limit: i32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct GetUserMetadataResponseProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    metadata: Option<UserMetadataProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct UpsertUserMetadataResponseProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    metadata: Option<UserMetadataProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct DeleteUserMetadataResponseProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    metadata: Option<UserMetadataProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ScanUserMetadataResponseProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, repeated, tag = "2")]
+    items: Vec<UserMetadataProto>,
+    #[prost(int32, tag = "3")]
+    count: i32,
+    #[prost(string, tag = "4")]
+    next_after: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
 struct ClientEnvelopeProto {
-    #[prost(oneof = "client_envelope_proto::Body", tags = "1, 2, 3, 4, 5, 18")]
+    #[prost(
+        oneof = "client_envelope_proto::Body",
+        tags = "1, 2, 3, 4, 5, 18, 19, 20, 21, 22"
+    )]
     body: Option<client_envelope_proto::Body>,
 }
 
@@ -300,6 +412,14 @@ mod client_envelope_proto {
         CreateUser(super::CreateUserRequestProto),
         #[prost(message, tag = "18")]
         ResolveUserSessions(super::ResolveUserSessionsRequestProto),
+        #[prost(message, tag = "19")]
+        GetUserMetadata(super::GetUserMetadataRequestProto),
+        #[prost(message, tag = "20")]
+        UpsertUserMetadata(super::UpsertUserMetadataRequestProto),
+        #[prost(message, tag = "21")]
+        DeleteUserMetadata(super::DeleteUserMetadataRequestProto),
+        #[prost(message, tag = "22")]
+        ScanUserMetadata(super::ScanUserMetadataRequestProto),
     }
 }
 
@@ -307,7 +427,7 @@ mod client_envelope_proto {
 struct ServerEnvelopeProto {
     #[prost(
         oneof = "server_envelope_proto::Body",
-        tags = "1, 2, 3, 4, 5, 6, 7, 20"
+        tags = "1, 2, 3, 4, 5, 6, 7, 20, 21, 22, 23, 24"
     )]
     body: Option<server_envelope_proto::Body>,
 }
@@ -331,6 +451,14 @@ mod server_envelope_proto {
         CreateUserResponse(super::CreateUserResponseProto),
         #[prost(message, tag = "20")]
         ResolveUserSessionsResponse(super::ResolveUserSessionsResponseProto),
+        #[prost(message, tag = "21")]
+        GetUserMetadataResponse(super::GetUserMetadataResponseProto),
+        #[prost(message, tag = "22")]
+        UpsertUserMetadataResponse(super::UpsertUserMetadataResponseProto),
+        #[prost(message, tag = "23")]
+        DeleteUserMetadataResponse(super::DeleteUserMetadataResponseProto),
+        #[prost(message, tag = "24")]
+        ScanUserMetadataResponse(super::ScanUserMetadataResponseProto),
     }
 }
 
@@ -447,6 +575,18 @@ fn message_proto(seq: i64) -> MessageProto {
             vec![0xff, 0x00]
         },
         created_at_hlc: format!("hlc-{seq}"),
+    }
+}
+
+fn user_metadata_proto(updated_at: &str, deleted_at: &str) -> UserMetadataProto {
+    UserMetadataProto {
+        owner: Some(user_ref(4096, 1025)),
+        key: "session:web:1".into(),
+        value: vec![0x00, 0xfe],
+        updated_at: updated_at.into(),
+        deleted_at: deleted_at.into(),
+        expires_at: "2026-05-01T12:00:00Z".into(),
+        origin_node_id: 4096,
     }
 }
 
@@ -897,6 +1037,270 @@ async fn client_resolves_sessions_and_targets_transient_delivery() {
 
     client.close().await.unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn client_user_metadata_crud_and_scan() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let paths = Arc::new(StdMutex::new(Vec::new()));
+    let paths_for_server = Arc::clone(&paths);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener, paths_for_server).await;
+        let login = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::Login(_) = login.body.unwrap() else {
+            panic!("expected login request");
+        };
+
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("metadata-session")),
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let upsert = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::UpsertUserMetadata(upsert) = upsert.body.unwrap() else {
+            panic!("expected upsert_user_metadata request");
+        };
+        assert_eq!(upsert.request_id, 1);
+        assert_eq!(upsert.owner, Some(user_ref(4096, 1025)));
+        assert_eq!(upsert.key, "session:web:1");
+        assert_eq!(upsert.value, vec![0x00, 0xfe]);
+        assert_eq!(
+            upsert.expires_at.as_ref().map(|value| value.value.as_str()),
+            Some("2026-05-01T12:00:00Z")
+        );
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::UpsertUserMetadataResponse(
+                    UpsertUserMetadataResponseProto {
+                        request_id: upsert.request_id,
+                        metadata: Some(user_metadata_proto("hlc-meta-upsert", "")),
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let get = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::GetUserMetadata(get) = get.body.unwrap() else {
+            panic!("expected get_user_metadata request");
+        };
+        assert_eq!(get.request_id, 2);
+        assert_eq!(get.owner, Some(user_ref(4096, 1025)));
+        assert_eq!(get.key, "session:web:1");
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::GetUserMetadataResponse(
+                    GetUserMetadataResponseProto {
+                        request_id: get.request_id,
+                        metadata: Some(user_metadata_proto("hlc-meta-get", "")),
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let scan = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::ScanUserMetadata(scan) = scan.body.unwrap() else {
+            panic!("expected scan_user_metadata request");
+        };
+        assert_eq!(scan.request_id, 3);
+        assert_eq!(scan.owner, Some(user_ref(4096, 1025)));
+        assert_eq!(scan.prefix, "session:");
+        assert_eq!(scan.after, "session:web:0");
+        assert_eq!(scan.limit, 1);
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::ScanUserMetadataResponse(
+                    ScanUserMetadataResponseProto {
+                        request_id: scan.request_id,
+                        items: vec![user_metadata_proto("hlc-meta-scan", "")],
+                        count: 1,
+                        next_after: "session:web:1".into(),
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let delete = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::DeleteUserMetadata(delete) = delete.body.unwrap() else {
+            panic!("expected delete_user_metadata request");
+        };
+        assert_eq!(delete.request_id, 4);
+        assert_eq!(delete.owner, Some(user_ref(4096, 1025)));
+        assert_eq!(delete.key, "session:web:1");
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::DeleteUserMetadataResponse(
+                    DeleteUserMetadataResponseProto {
+                        request_id: delete.request_id,
+                        metadata: Some(user_metadata_proto("hlc-meta-upsert", "hlc-meta-deleted")),
+                    },
+                )),
+            },
+        )
+        .await;
+    });
+
+    let mut config = Config::new(
+        format!("http://{address}"),
+        turntf::Credentials {
+            node_id: 4096,
+            user_id: 1025,
+            password: plain_password("alice-password").unwrap(),
+        },
+    );
+    config.ping_interval = Duration::from_secs(3600);
+    let client = Client::new(config).unwrap();
+
+    client.connect().await.unwrap();
+
+    let metadata = client
+        .upsert_user_metadata(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            "session:web:1",
+            UpsertUserMetadataRequest {
+                value: vec![0x00, 0xfe],
+                expires_at: Some("2026-05-01T12:00:00Z".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(metadata.value, vec![0x00, 0xfe]);
+    assert_eq!(metadata.updated_at, "hlc-meta-upsert");
+    assert_eq!(metadata.expires_at, "2026-05-01T12:00:00Z");
+
+    let loaded = client
+        .get_user_metadata(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            "session:web:1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded.updated_at, "hlc-meta-get");
+
+    let scanned = client
+        .scan_user_metadata(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            ScanUserMetadataRequest {
+                prefix: "session:".into(),
+                after: "session:web:0".into(),
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanned.count, 1);
+    assert_eq!(scanned.next_after, "session:web:1");
+    assert_eq!(scanned.items.len(), 1);
+    assert_eq!(scanned.items[0].updated_at, "hlc-meta-scan");
+
+    let deleted = client
+        .delete_user_metadata(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            "session:web:1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.deleted_at, "hlc-meta-deleted");
+
+    client.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn client_user_metadata_validates_inputs_before_rpc() {
+    let mut config = Config::new(
+        "http://127.0.0.1:65535",
+        turntf::Credentials {
+            node_id: 4096,
+            user_id: 1025,
+            password: plain_password("alice-password").unwrap(),
+        },
+    );
+    config.ping_interval = Duration::from_secs(3600);
+    let client = Client::new(config).unwrap();
+
+    let error = client
+        .get_user_metadata(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            "bad/key",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
+
+    let error = client
+        .scan_user_metadata(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            ScanUserMetadataRequest {
+                prefix: "bad/prefix".into(),
+                after: String::new(),
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
+
+    let error = client
+        .scan_user_metadata(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            ScanUserMetadataRequest {
+                prefix: String::new(),
+                after: String::new(),
+                limit: -1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
 }
 
 #[tokio::test]

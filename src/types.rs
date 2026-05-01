@@ -82,6 +82,24 @@ pub struct User {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMetadata {
+    pub owner: UserRef,
+    pub key: String,
+    pub value: Vec<u8>,
+    pub updated_at: String,
+    pub deleted_at: String,
+    pub expires_at: String,
+    pub origin_node_id: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMetadataScanResult {
+    pub items: Vec<UserMetadata>,
+    pub count: i32,
+    pub next_after: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub recipient: UserRef,
     pub node_id: i64,
@@ -295,6 +313,19 @@ pub struct UpdateUserRequest {
     pub password: Option<PasswordInput>,
     pub profile_json: Option<Vec<u8>>,
     pub role: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UpsertUserMetadataRequest {
+    pub value: Vec<u8>,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ScanUserMetadataRequest {
+    pub prefix: String,
+    pub after: String,
+    pub limit: i32,
 }
 
 #[derive(Clone)]

@@ -24,5 +24,6 @@ pub use types::{
     DeleteUserResult, DeliveryMode, Event, EventLogTrimStatus, LoggedInUser, LoginInfo, Message,
     MessageCursor, MessageTrimStatus, OnlineNodePresence, OperationsStatus, Packet,
     PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted, ResolvedSession,
-    ResolvedUserSessions, SessionRef, Subscription, UpdateUserRequest, User, UserRef,
+    ResolvedUserSessions, ScanUserMetadataRequest, SessionRef, Subscription, UpdateUserRequest,
+    UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult, UserRef,
 };

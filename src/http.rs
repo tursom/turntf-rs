@@ -9,14 +9,19 @@ use crate::mapping::{
     delete_user_result_from_http, event_from_http, expect_object, items_from_payload,
     json_bytes_to_value, logged_in_user_from_http, message_from_http, operations_status_from_http,
     relay_accepted_from_http, subscription_from_attachment, user_from_http,
+    user_metadata_from_http, user_metadata_scan_result_from_http,
 };
 use crate::password::{plain_password, PasswordInput};
 use crate::types::{
     Attachment, AttachmentType, BlacklistEntry, ClusterNode, CreateUserRequest, DeleteUserResult,
-    DeliveryMode, Event, LoggedInUser, Message, OperationsStatus, RelayAccepted, Subscription,
-    UpdateUserRequest, User, UserRef,
+    DeliveryMode, Event, LoggedInUser, Message, OperationsStatus, RelayAccepted,
+    ScanUserMetadataRequest, Subscription, UpdateUserRequest, UpsertUserMetadataRequest, User,
+    UserMetadata, UserMetadataScanResult, UserRef,
 };
-use crate::validation::{validate_delivery_mode, validate_positive_i64, validate_user_ref};
+use crate::validation::{
+    validate_delivery_mode, validate_optional_user_metadata_key_fragment, validate_positive_i64,
+    validate_user_metadata_key, validate_user_metadata_scan_limit, validate_user_ref,
+};
 
 #[derive(Clone, Debug)]
 pub struct HttpClient {
@@ -199,6 +204,126 @@ impl HttpClient {
             )
             .await?;
         delete_user_result_from_http(expect_object(&response)?)
+    }
+
+    pub async fn get_user_metadata(
+        &self,
+        token: &str,
+        owner: UserRef,
+        key: impl Into<String>,
+    ) -> Result<UserMetadata> {
+        validate_user_ref(&owner, "owner")?;
+        let key = key.into();
+        validate_user_metadata_key(&key, "key")?;
+        let response = self
+            .request_json(
+                Method::GET,
+                &format!(
+                    "/nodes/{}/users/{}/metadata/{key}",
+                    owner.node_id, owner.user_id
+                ),
+                token,
+                None,
+                &[200],
+            )
+            .await?;
+        user_metadata_from_http(expect_object(&response)?)
+    }
+
+    pub async fn upsert_user_metadata(
+        &self,
+        token: &str,
+        owner: UserRef,
+        key: impl Into<String>,
+        request: UpsertUserMetadataRequest,
+    ) -> Result<UserMetadata> {
+        validate_user_ref(&owner, "owner")?;
+        let key = key.into();
+        validate_user_metadata_key(&key, "key")?;
+        let mut body =
+            Map::from_iter([("value".into(), Value::from(STANDARD.encode(request.value)))]);
+        if let Some(expires_at) = request.expires_at {
+            body.insert("expires_at".into(), Value::from(expires_at));
+        }
+
+        let response = self
+            .request_json(
+                Method::PUT,
+                &format!(
+                    "/nodes/{}/users/{}/metadata/{key}",
+                    owner.node_id, owner.user_id
+                ),
+                token,
+                Some(Value::Object(body)),
+                &[200, 201],
+            )
+            .await?;
+        user_metadata_from_http(expect_object(&response)?)
+    }
+
+    pub async fn delete_user_metadata(
+        &self,
+        token: &str,
+        owner: UserRef,
+        key: impl Into<String>,
+    ) -> Result<UserMetadata> {
+        validate_user_ref(&owner, "owner")?;
+        let key = key.into();
+        validate_user_metadata_key(&key, "key")?;
+        let response = self
+            .request_json(
+                Method::DELETE,
+                &format!(
+                    "/nodes/{}/users/{}/metadata/{key}",
+                    owner.node_id, owner.user_id
+                ),
+                token,
+                None,
+                &[200],
+            )
+            .await?;
+        user_metadata_from_http(expect_object(&response)?)
+    }
+
+    pub async fn scan_user_metadata(
+        &self,
+        token: &str,
+        owner: UserRef,
+        request: ScanUserMetadataRequest,
+    ) -> Result<UserMetadataScanResult> {
+        validate_user_ref(&owner, "owner")?;
+        validate_optional_user_metadata_key_fragment(&request.prefix, "prefix")?;
+        validate_optional_user_metadata_key_fragment(&request.after, "after")?;
+        validate_user_metadata_scan_limit(request.limit)?;
+
+        let mut params = Vec::new();
+        if !request.prefix.is_empty() {
+            params.push(format!("prefix={}", request.prefix));
+        }
+        if !request.after.is_empty() {
+            params.push(format!("after={}", request.after));
+        }
+        if request.limit > 0 {
+            params.push(format!("limit={}", request.limit));
+        }
+        let suffix = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+        let response = self
+            .request_json(
+                Method::GET,
+                &format!(
+                    "/nodes/{}/users/{}/metadata{suffix}",
+                    owner.node_id, owner.user_id
+                ),
+                token,
+                None,
+                &[200],
+            )
+            .await?;
+        user_metadata_scan_result_from_http(expect_object(&response)?)
     }
 
     pub async fn create_subscription(
