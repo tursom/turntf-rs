@@ -257,6 +257,20 @@ pub async fn login_with_password(
     password: PasswordInput,
 ) -> Result<String>
 
+// 通过 login_name + 明文密码登录
+pub async fn login_by_login_name(
+    &self,
+    login_name: impl AsRef<str>,
+    password: impl AsRef<str>,
+) -> Result<String>
+
+// 通过 login_name + 已编码密码登录
+pub async fn login_by_login_name_with_password(
+    &self,
+    login_name: impl AsRef<str>,
+    password: PasswordInput,
+) -> Result<String>
+
 // 获取内部 HttpClient 的克隆
 pub fn http(&self) -> HttpClient
 ```
@@ -269,7 +283,8 @@ pub fn http(&self) -> HttpClient
 #[derive(Clone)]
 pub struct Config {
     pub base_url: String,                              // 服务端 HTTP 基础地址
-    pub credentials: Credentials,                      // 登录凭据
+    pub credentials: Credentials,                      // 旧式登录凭据
+    pub login_name: Option<String>,                    // 新式登录名；非空时优先使用
     pub cursor_store: Arc<dyn CursorStore>,            // 游标存储（默认 MemoryCursorStore）
     pub reconnect: bool,                               // 自动重连（默认 true）
     pub initial_reconnect_delay: Duration,             // 首次重连延迟（默认 1s）
@@ -284,6 +299,11 @@ pub struct Config {
 
 impl Config {
     pub fn new(base_url: impl Into<String>, credentials: Credentials) -> Self
+    pub fn new_with_login_name(
+        base_url: impl Into<String>,
+        login_name: impl Into<String>,
+        password: PasswordInput,
+    ) -> Self
 }
 ```
 
@@ -332,6 +352,20 @@ pub async fn login_with_password(
     &self,
     node_id: i64,
     user_id: i64,
+    password: PasswordInput,
+) -> Result<String>
+
+// 使用 login_name + 明文密码登录
+pub async fn login_by_login_name(
+    &self,
+    login_name: impl AsRef<str>,
+    password: impl AsRef<str>,
+) -> Result<String>
+
+// 使用 login_name + 已编码密码登录
+pub async fn login_by_login_name_with_password(
+    &self,
+    login_name: impl AsRef<str>,
     password: PasswordInput,
 ) -> Result<String>
 ```
@@ -556,6 +590,7 @@ pub struct User {
     pub node_id: i64,
     pub user_id: i64,
     pub username: String,
+    pub login_name: String,                        // 登录名；空串表示未绑定
     pub role: String,                              // "user" / "channel" / "admin" 等
     pub profile_json: Vec<u8>,                     // JSON 格式的用户资料
     pub system_reserved: bool,
@@ -679,6 +714,7 @@ pub struct LoggedInUser {
     pub node_id: i64,
     pub user_id: i64,
     pub username: String,
+    pub login_name: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -781,6 +817,7 @@ pub struct PeerStatus {
 #[derive(Clone, Debug, Default)]
 pub struct CreateUserRequest {
     pub username: String,
+    pub login_name: Option<String>,  // Some(non-empty) 绑定登录名
     pub password: Option<PasswordInput>,
     pub profile_json: Vec<u8>,       // JSON bytes
     pub role: String,
@@ -789,6 +826,7 @@ pub struct CreateUserRequest {
 #[derive(Clone, Debug, Default)]
 pub struct UpdateUserRequest {
     pub username: Option<String>,
+    pub login_name: Option<String>,  // None 不改；Some("") 解绑
     pub password: Option<PasswordInput>,
     pub profile_json: Option<Vec<u8>>,
     pub role: Option<String>,

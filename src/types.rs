@@ -79,6 +79,7 @@ pub struct User {
     pub created_at: String,
     pub updated_at: String,
     pub origin_node_id: i64,
+    pub login_name: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +196,7 @@ pub struct LoggedInUser {
     pub node_id: i64,
     pub user_id: i64,
     pub username: String,
+    pub login_name: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +304,7 @@ pub struct LoginInfo {
 #[derive(Clone, Debug, Default)]
 pub struct CreateUserRequest {
     pub username: String,
+    pub login_name: Option<String>,
     pub password: Option<PasswordInput>,
     pub profile_json: Vec<u8>,
     pub role: String,
@@ -310,6 +313,7 @@ pub struct CreateUserRequest {
 #[derive(Clone, Debug, Default)]
 pub struct UpdateUserRequest {
     pub username: Option<String>,
+    pub login_name: Option<String>,
     pub password: Option<PasswordInput>,
     pub profile_json: Option<Vec<u8>>,
     pub role: Option<String>,

@@ -4,8 +4,19 @@ use crate::types::{DeliveryMode, SessionRef, UserRef};
 const USER_METADATA_KEY_MAX_LENGTH: usize = 128;
 const USER_METADATA_SCAN_LIMIT_MAX: i32 = 1000;
 
+pub(crate) fn normalize_login_name(value: &str) -> String {
+    value.trim().to_owned()
+}
+
 pub fn validate_positive_i64(value: i64, field: &str) -> Result<()> {
     if value <= 0 {
+        return Err(Error::validation(format!("{field} is required")));
+    }
+    Ok(())
+}
+
+pub fn validate_login_name(value: &str, field: &str) -> Result<()> {
+    if normalize_login_name(value).is_empty() {
         return Err(Error::validation(format!("{field} is required")));
     }
     Ok(())

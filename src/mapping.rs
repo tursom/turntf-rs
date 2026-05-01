@@ -111,6 +111,7 @@ pub(crate) fn user_from_proto(value: Option<&proto::User>) -> Result<User> {
         created_at: value.created_at.clone(),
         updated_at: value.updated_at.clone(),
         origin_node_id: value.origin_node_id,
+        login_name: value.login_name.clone(),
     })
 }
 
@@ -304,6 +305,7 @@ pub(crate) fn logged_in_user_from_proto(
         node_id: value.node_id,
         user_id: value.user_id,
         username: value.username.clone(),
+        login_name: value.login_name.clone(),
     })
 }
 
@@ -434,6 +436,7 @@ pub(crate) fn user_from_http(value: &Map<String, Value>) -> Result<User> {
         created_at: str_value(value.get("created_at")),
         updated_at: str_value(value.get("updated_at")),
         origin_node_id: int_value(value.get("origin_node_id")),
+        login_name: str_value(value.get("login_name")),
     })
 }
 
@@ -556,6 +559,7 @@ pub(crate) fn logged_in_user_from_http(value: &Map<String, Value>) -> Result<Log
         node_id: int_value(value.get("node_id")),
         user_id: int_value(value.get("user_id")),
         username: str_value(value.get("username")),
+        login_name: str_value(value.get("login_name")),
     })
 }
 

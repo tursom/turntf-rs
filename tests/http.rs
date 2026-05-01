@@ -175,12 +175,25 @@ async fn http_client_requests_and_encoding() {
                 let password = body.get("password").and_then(Value::as_str).unwrap();
                 assert_ne!(password, "root");
                 assert!(verify("root", password).unwrap());
-                HttpTestResponse::json(json!({ "token": "admin-token" }), 200)
+                if let Some(login_name) = body.get("login_name").and_then(Value::as_str) {
+                    assert_eq!(login_name, "root.login");
+                    assert!(body.get("node_id").is_none());
+                    assert!(body.get("user_id").is_none());
+                    HttpTestResponse::json(json!({ "token": "login-name-token" }), 200)
+                } else {
+                    assert_eq!(body.get("node_id").and_then(Value::as_i64), Some(4096));
+                    assert_eq!(body.get("user_id").and_then(Value::as_i64), Some(1));
+                    HttpTestResponse::json(json!({ "token": "admin-token" }), 200)
+                }
             }
             ("POST", "/users") => {
                 assert_eq!(
                     request.headers.get("authorization").map(String::as_str),
                     Some("Bearer admin-token")
+                );
+                assert_eq!(
+                    body.get("login_name").and_then(Value::as_str),
+                    Some("alice.login")
                 );
                 let password = body.get("password").and_then(Value::as_str).unwrap();
                 assert_ne!(password, "alice-password");
@@ -192,6 +205,7 @@ async fn http_client_requests_and_encoding() {
                         "node_id": 4096,
                         "user_id": 1025,
                         "username": body.get("username").unwrap(),
+                        "login_name": body.get("login_name").unwrap(),
                         "role": body.get("role").unwrap(),
                         "profile": { "tier": "gold" },
                         "created_at": "hlc-created"
@@ -204,12 +218,14 @@ async fn http_client_requests_and_encoding() {
                     "node_id": 4096,
                     "user_id": 1025,
                     "username": "alice",
+                    "login_name": "alice.login",
                     "role": "user",
                     "profile": { "tier": "gold" }
                 }),
                 200,
             ),
             ("PATCH", "/nodes/4096/users/1025") => {
+                assert_eq!(body.get("login_name").and_then(Value::as_str), Some(""));
                 let password = body.get("password").and_then(Value::as_str).unwrap();
                 assert_ne!(password, "new-password");
                 assert!(verify("new-password", password).unwrap());
@@ -218,6 +234,7 @@ async fn http_client_requests_and_encoding() {
                         "node_id": 4096,
                         "user_id": 1025,
                         "username": body.get("username").unwrap(),
+                        "login_name": body.get("login_name").unwrap(),
                         "role": body.get("role").unwrap(),
                         "profile": body.get("profile").unwrap(),
                     }),
@@ -404,8 +421,8 @@ async fn http_client_requests_and_encoding() {
                 json!({
                     "target_node_id": 4096,
                     "items": [
-                        { "node_id": 4096, "user_id": 1025, "username": "alice" },
-                        { "node_id": 4096, "user_id": 1026, "username": "bob" }
+                        { "node_id": 4096, "user_id": 1025, "username": "alice", "login_name": "alice.login" },
+                        { "node_id": 4096, "user_id": 1026, "username": "bob", "login_name": "bob.login" }
                     ],
                     "count": 2
                 }),
@@ -519,12 +536,18 @@ async fn http_client_requests_and_encoding() {
 
     let token = client.login(4096, 1, "root").await.unwrap();
     assert_eq!(token, "admin-token");
+    let login_name_token = client
+        .login_by_login_name("root.login", "root")
+        .await
+        .unwrap();
+    assert_eq!(login_name_token, "login-name-token");
 
     let user = client
         .create_user(
             &token,
             CreateUserRequest {
                 username: "alice".into(),
+                login_name: Some("alice.login".into()),
                 password: Some(plain_password("alice-password").unwrap()),
                 profile_json: br#"{"tier":"gold"}"#.to_vec(),
                 role: "user".into(),
@@ -533,6 +556,7 @@ async fn http_client_requests_and_encoding() {
         .await
         .unwrap();
     assert_eq!(user.user_id, 1025);
+    assert_eq!(user.login_name, "alice.login");
     assert_eq!(user.profile_json, br#"{"tier":"gold"}"#);
 
     let fetched = client
@@ -546,6 +570,7 @@ async fn http_client_requests_and_encoding() {
         .await
         .unwrap();
     assert_eq!(fetched.username, "alice");
+    assert_eq!(fetched.login_name, "alice.login");
 
     let updated = client
         .update_user(
@@ -556,6 +581,7 @@ async fn http_client_requests_and_encoding() {
             },
             UpdateUserRequest {
                 username: Some("alice-2".into()),
+                login_name: Some(String::new()),
                 password: Some(plain_password("new-password").unwrap()),
                 profile_json: Some(br#"{"tier":"platinum"}"#.to_vec()),
                 role: Some("admin".into()),
@@ -564,6 +590,7 @@ async fn http_client_requests_and_encoding() {
         .await
         .unwrap();
     assert_eq!(updated.username, "alice-2");
+    assert!(updated.login_name.is_empty());
     assert_eq!(updated.profile_json, br#"{"tier":"platinum"}"#);
 
     let metadata = client
@@ -729,6 +756,13 @@ async fn http_client_requests_and_encoding() {
             .map(|user| user.username.as_str())
             .collect::<Vec<_>>(),
         vec!["alice", "bob"]
+    );
+    assert_eq!(
+        users
+            .iter()
+            .map(|user| user.login_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alice.login", "bob.login"]
     );
 
     let blocked = client

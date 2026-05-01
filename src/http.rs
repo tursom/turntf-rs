@@ -19,7 +19,8 @@ use crate::types::{
     UserMetadata, UserMetadataScanResult, UserRef,
 };
 use crate::validation::{
-    validate_delivery_mode, validate_optional_user_metadata_key_fragment, validate_positive_i64,
+    normalize_login_name, validate_delivery_mode, validate_login_name,
+    validate_optional_user_metadata_key_fragment, validate_positive_i64,
     validate_user_metadata_key, validate_user_metadata_scan_limit, validate_user_ref,
 };
 
@@ -69,50 +70,85 @@ impl HttpClient {
         validate_positive_i64(node_id, "node_id")?;
         validate_positive_i64(user_id, "user_id")?;
 
-        let response = self
-            .request_json(
-                Method::POST,
-                "/auth/login",
-                "",
-                Some(Value::Object(Map::from_iter([
-                    ("node_id".into(), Value::from(node_id)),
-                    ("user_id".into(), Value::from(user_id)),
-                    (
-                        "password".into(),
-                        Value::from(password.wire_value()?.to_owned()),
-                    ),
-                ]))),
-                &[200],
-            )
-            .await?;
-        let object = expect_object(&response)?;
-        match object.get("token").and_then(Value::as_str) {
-            Some(token) if !token.is_empty() => Ok(token.to_owned()),
-            _ => Err(Error::protocol("empty token in login response")),
-        }
+        self.login_with_body(Map::from_iter([
+            ("node_id".into(), Value::from(node_id)),
+            ("user_id".into(), Value::from(user_id)),
+            (
+                "password".into(),
+                Value::from(password.wire_value()?.to_owned()),
+            ),
+        ]))
+        .await
+    }
+
+    pub async fn login_by_login_name(
+        &self,
+        login_name: impl AsRef<str>,
+        password: impl AsRef<str>,
+    ) -> Result<String> {
+        self.login_by_login_name_with_password(
+            login_name.as_ref(),
+            plain_password(password.as_ref())?,
+        )
+        .await
+    }
+
+    pub async fn login_by_login_name_with_password(
+        &self,
+        login_name: impl AsRef<str>,
+        password: PasswordInput,
+    ) -> Result<String> {
+        let login_name = normalize_login_name(login_name.as_ref());
+        validate_login_name(&login_name, "login_name")?;
+        self.login_with_body(Map::from_iter([
+            ("login_name".into(), Value::from(login_name)),
+            (
+                "password".into(),
+                Value::from(password.wire_value()?.to_owned()),
+            ),
+        ]))
+        .await
     }
 
     pub async fn create_user(&self, token: &str, request: CreateUserRequest) -> Result<User> {
-        if request.username.is_empty() {
+        let CreateUserRequest {
+            username,
+            login_name,
+            password,
+            profile_json,
+            role,
+        } = request;
+        if username.is_empty() {
             return Err(Error::validation("username is required"));
         }
-        if request.role.is_empty() {
+        if role.is_empty() {
             return Err(Error::validation("role is required"));
+        }
+        let login_name = login_name
+            .map(|value| normalize_login_name(&value))
+            .filter(|value| !value.is_empty());
+        if role.trim() == "channel" && login_name.is_some() {
+            return Err(Error::validation(
+                "login_name requires a login-enabled user",
+            ));
         }
 
         let mut body = Map::new();
-        body.insert("username".into(), Value::from(request.username));
-        body.insert("role".into(), Value::from(request.role));
-        if let Some(password) = request.password {
+        body.insert("username".into(), Value::from(username));
+        body.insert("role".into(), Value::from(role));
+        if let Some(login_name) = login_name {
+            body.insert("login_name".into(), Value::from(login_name));
+        }
+        if let Some(password) = password {
             body.insert(
                 "password".into(),
                 Value::from(password.wire_value()?.to_owned()),
             );
         }
-        if !request.profile_json.is_empty() {
+        if !profile_json.is_empty() {
             body.insert(
                 "profile".into(),
-                json_bytes_to_value(&request.profile_json, "profile_json")?,
+                json_bytes_to_value(&profile_json, "profile_json")?,
             );
         }
 
@@ -160,23 +196,41 @@ impl HttpClient {
         request: UpdateUserRequest,
     ) -> Result<User> {
         validate_user_ref(&target, "target")?;
+        let UpdateUserRequest {
+            username,
+            login_name,
+            password,
+            profile_json,
+            role,
+        } = request;
+        let login_name = login_name.map(|value| normalize_login_name(&value));
+        if role.as_deref().map(str::trim) == Some("channel")
+            && matches!(login_name.as_deref(), Some(value) if !value.is_empty())
+        {
+            return Err(Error::validation(
+                "login_name requires a login-enabled user",
+            ));
+        }
         let mut body = Map::new();
-        if let Some(username) = request.username {
+        if let Some(username) = username {
             body.insert("username".into(), Value::from(username));
         }
-        if let Some(password) = request.password {
+        if let Some(login_name) = login_name {
+            body.insert("login_name".into(), Value::from(login_name));
+        }
+        if let Some(password) = password {
             body.insert(
                 "password".into(),
                 Value::from(password.wire_value()?.to_owned()),
             );
         }
-        if let Some(profile_json) = request.profile_json {
+        if let Some(profile_json) = profile_json {
             body.insert(
                 "profile".into(),
                 json_bytes_to_value(&profile_json, "profile_json")?,
             );
         }
-        if let Some(role) = request.role {
+        if let Some(role) = role {
             body.insert("role".into(), Value::from(role));
         }
 
@@ -513,6 +567,23 @@ impl HttpClient {
             .map(expect_object)
             .map(|value| value.and_then(logged_in_user_from_http))
             .collect()
+    }
+
+    async fn login_with_body(&self, body: Map<String, Value>) -> Result<String> {
+        let response = self
+            .request_json(
+                Method::POST,
+                "/auth/login",
+                "",
+                Some(Value::Object(body)),
+                &[200],
+            )
+            .await?;
+        let object = expect_object(&response)?;
+        match object.get("token").and_then(Value::as_str) {
+            Some(token) if !token.is_empty() => Ok(token.to_owned()),
+            _ => Err(Error::protocol("empty token in login response")),
+        }
     }
 
     pub async fn block_user(

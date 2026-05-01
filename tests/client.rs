@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use turntf::{
     plain_password, Client, ClientEvent, Config, CreateUserRequest, CursorStore, DeliveryMode,
     MemoryCursorStore, Message, MessageCursor, ScanUserMetadataRequest, SessionRef,
-    UpsertUserMetadataRequest,
+    UpdateUserRequest, UpsertUserMetadataRequest,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -40,6 +40,8 @@ struct MessageCursorProto {
 struct LoginRequestProto {
     #[prost(message, optional, tag = "1")]
     user: Option<UserRefProto>,
+    #[prost(string, tag = "2")]
+    login_name: String,
     #[prost(string, tag = "3")]
     password: String,
     #[prost(message, repeated, tag = "4")]
@@ -68,6 +70,8 @@ struct UserProto {
     updated_at: String,
     #[prost(int64, tag = "9")]
     origin_node_id: i64,
+    #[prost(string, tag = "10")]
+    login_name: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -270,6 +274,8 @@ struct CreateUserRequestProto {
     profile_json: Vec<u8>,
     #[prost(string, tag = "5")]
     role: String,
+    #[prost(string, tag = "6")]
+    login_name: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -281,9 +287,41 @@ struct CreateUserResponseProto {
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
+struct BytesFieldProto {
+    #[prost(bytes = "vec", tag = "1")]
+    value: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
 struct StringFieldProto {
     #[prost(string, tag = "1")]
     value: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct UpdateUserRequestProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    user: Option<UserRefProto>,
+    #[prost(message, optional, tag = "3")]
+    username: Option<StringFieldProto>,
+    #[prost(message, optional, tag = "4")]
+    password: Option<StringFieldProto>,
+    #[prost(message, optional, tag = "5")]
+    profile_json: Option<BytesFieldProto>,
+    #[prost(message, optional, tag = "6")]
+    role: Option<StringFieldProto>,
+    #[prost(message, optional, tag = "7")]
+    login_name: Option<StringFieldProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct UpdateUserResponseProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, optional, tag = "2")]
+    user: Option<UserProto>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -392,7 +430,7 @@ struct ScanUserMetadataResponseProto {
 struct ClientEnvelopeProto {
     #[prost(
         oneof = "client_envelope_proto::Body",
-        tags = "1, 2, 3, 4, 5, 18, 19, 20, 21, 22"
+        tags = "1, 2, 3, 4, 5, 7, 18, 19, 20, 21, 22"
     )]
     body: Option<client_envelope_proto::Body>,
 }
@@ -410,6 +448,8 @@ mod client_envelope_proto {
         Ping(super::PingProto),
         #[prost(message, tag = "5")]
         CreateUser(super::CreateUserRequestProto),
+        #[prost(message, tag = "7")]
+        UpdateUser(super::UpdateUserRequestProto),
         #[prost(message, tag = "18")]
         ResolveUserSessions(super::ResolveUserSessionsRequestProto),
         #[prost(message, tag = "19")]
@@ -427,7 +467,7 @@ mod client_envelope_proto {
 struct ServerEnvelopeProto {
     #[prost(
         oneof = "server_envelope_proto::Body",
-        tags = "1, 2, 3, 4, 5, 6, 7, 20, 21, 22, 23, 24"
+        tags = "1, 2, 3, 4, 5, 6, 7, 9, 20, 21, 22, 23, 24"
     )]
     body: Option<server_envelope_proto::Body>,
 }
@@ -449,6 +489,8 @@ mod server_envelope_proto {
         PacketPushed(super::PacketPushedProto),
         #[prost(message, tag = "7")]
         CreateUserResponse(super::CreateUserResponseProto),
+        #[prost(message, tag = "9")]
+        UpdateUserResponse(super::UpdateUserResponseProto),
         #[prost(message, tag = "20")]
         ResolveUserSessionsResponse(super::ResolveUserSessionsResponseProto),
         #[prost(message, tag = "21")]
@@ -604,6 +646,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
             panic!("expected login request");
         };
         assert_eq!(login.user.unwrap().user_id, 1025);
+        assert!(login.login_name.is_empty());
         assert_ne!(login.password, "alice-password");
         assert!(verify("alice-password", &login.password).unwrap());
         assert!(login.seen_messages.is_empty());
@@ -623,6 +666,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
                             created_at: String::new(),
                             updated_at: String::new(),
                             origin_node_id: 4096,
+                            login_name: "alice.login".into(),
                         }),
                         protocol_version: "client-v1alpha1".into(),
                         session_ref: Some(session_ref("session-main")),
@@ -728,6 +772,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
             panic!("expected create_user request");
         };
         assert_eq!(create_user.username, "alice");
+        assert_eq!(create_user.login_name, "alice.login");
         assert!(verify("alice-password", &create_user.password).unwrap());
         send_server_envelope(
             &mut ws,
@@ -745,6 +790,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
                             created_at: String::new(),
                             updated_at: String::new(),
                             origin_node_id: 4096,
+                            login_name: "alice.login".into(),
                         }),
                     },
                 )),
@@ -795,6 +841,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
     assert!(matches!(
         login_event,
         ClientEvent::Login(ref info) if info.session_ref.session_id == "session-main"
+            && info.user.login_name == "alice.login"
     ));
     assert!(
         matches!(next_event(&mut events).await.unwrap(), ClientEvent::Message(message) if message.seq == 7)
@@ -831,6 +878,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
     let user = client
         .create_user(CreateUserRequest {
             username: "alice".into(),
+            login_name: Some("alice.login".into()),
             password: Some(plain_password("alice-password").unwrap()),
             profile_json: Vec::new(),
             role: "user".into(),
@@ -838,6 +886,7 @@ async fn client_login_message_ack_send_packet_create_user_and_ping() {
         .await
         .unwrap();
     assert_eq!(user.user_id, 1026);
+    assert_eq!(user.login_name, "alice.login");
 
     client.ping().await.unwrap();
     client.close().await.unwrap();
@@ -879,6 +928,7 @@ async fn client_resolves_sessions_and_targets_transient_delivery() {
                             created_at: String::new(),
                             updated_at: String::new(),
                             origin_node_id: 4096,
+                            login_name: String::new(),
                         }),
                         protocol_version: "client-v1alpha1".into(),
                         session_ref: Some(session_ref("login-session")),
@@ -1040,6 +1090,124 @@ async fn client_resolves_sessions_and_targets_transient_delivery() {
 }
 
 #[tokio::test]
+async fn client_logs_in_with_login_name_selector_and_clears_login_name() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let paths = Arc::new(StdMutex::new(Vec::new()));
+    let paths_for_server = Arc::clone(&paths);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener, paths_for_server).await;
+        let login = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::Login(login) = login.body.unwrap() else {
+            panic!("expected login request");
+        };
+        assert!(login.user.is_none());
+        assert_eq!(login.login_name, "alice.login");
+        assert_ne!(login.password, "alice-password");
+        assert!(verify("alice-password", &login.password).unwrap());
+
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                            login_name: "alice.login".into(),
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("login-name-session")),
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let update = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::UpdateUser(update) = update.body.unwrap() else {
+            panic!("expected update_user request");
+        };
+        assert_eq!(update.request_id, 1);
+        assert_eq!(update.user, Some(user_ref(4096, 1025)));
+        assert!(update.username.is_none());
+        assert!(update.password.is_none());
+        assert!(update.profile_json.is_none());
+        assert!(update.role.is_none());
+        assert_eq!(update.login_name.unwrap().value, "");
+
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::UpdateUserResponse(
+                    UpdateUserResponseProto {
+                        request_id: update.request_id,
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: Vec::new(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                            login_name: String::new(),
+                        }),
+                    },
+                )),
+            },
+        )
+        .await;
+    });
+
+    let client = Client::new(Config::new_with_login_name(
+        format!("http://{address}"),
+        "alice.login",
+        plain_password("alice-password").unwrap(),
+    ))
+    .unwrap();
+    let mut events = client.subscribe().await;
+
+    client.connect().await.unwrap();
+
+    let login_event = next_event(&mut events).await.unwrap();
+    assert!(matches!(
+        login_event,
+        ClientEvent::Login(ref info)
+            if info.session_ref.session_id == "login-name-session"
+                && info.user.login_name == "alice.login"
+    ));
+
+    let updated = client
+        .update_user(
+            turntf::UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            UpdateUserRequest {
+                login_name: Some("   ".into()),
+                ..UpdateUserRequest::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(updated.login_name.is_empty());
+
+    client.close().await.unwrap();
+    server.await.unwrap();
+    assert_eq!(&*paths.lock().unwrap(), &["/ws/client".to_string()]);
+}
+
+#[tokio::test]
 async fn client_user_metadata_crud_and_scan() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1068,6 +1236,7 @@ async fn client_user_metadata_crud_and_scan() {
                             created_at: String::new(),
                             updated_at: String::new(),
                             origin_node_id: 4096,
+                            login_name: String::new(),
                         }),
                         protocol_version: "client-v1alpha1".into(),
                         session_ref: Some(session_ref("metadata-session")),
@@ -1334,6 +1503,7 @@ async fn client_reconnects_with_seen_messages_and_realtime_path() {
                             created_at: String::new(),
                             updated_at: String::new(),
                             origin_node_id: 4096,
+                            login_name: String::new(),
                         }),
                         protocol_version: "client-v1alpha1".into(),
                         session_ref: Some(session_ref("reconnect-first")),
@@ -1385,6 +1555,7 @@ async fn client_reconnects_with_seen_messages_and_realtime_path() {
                             created_at: String::new(),
                             updated_at: String::new(),
                             origin_node_id: 4096,
+                            login_name: String::new(),
                         }),
                         protocol_version: "client-v1alpha1".into(),
                         session_ref: Some(session_ref("reconnect-second")),
@@ -1458,6 +1629,7 @@ async fn client_does_not_ack_on_persist_failure_and_emits_error() {
                             created_at: String::new(),
                             updated_at: String::new(),
                             origin_node_id: 4096,
+                            login_name: String::new(),
                         }),
                         protocol_version: "client-v1alpha1".into(),
                         session_ref: Some(session_ref("persist-failure")),
@@ -1538,6 +1710,7 @@ async fn client_subscription_reports_lagged_and_closes() {
                             created_at: String::new(),
                             updated_at: String::new(),
                             origin_node_id: 4096,
+                            login_name: String::new(),
                         }),
                         protocol_version: "client-v1alpha1".into(),
                         session_ref: Some(session_ref("lagged-subscription")),

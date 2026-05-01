@@ -39,9 +39,9 @@ use crate::types::{
     UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult, UserRef,
 };
 use crate::validation::{
-    validate_delivery_mode, validate_optional_user_metadata_key_fragment, validate_positive_i64,
-    validate_session_ref, validate_user_metadata_key, validate_user_metadata_scan_limit,
-    validate_user_ref,
+    normalize_login_name, validate_delivery_mode, validate_login_name,
+    validate_optional_user_metadata_key_fragment, validate_positive_i64, validate_session_ref,
+    validate_user_metadata_key, validate_user_metadata_scan_limit, validate_user_ref,
 };
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -73,6 +73,7 @@ impl Stream for ClientSubscription {
 pub struct Config {
     pub base_url: String,
     pub credentials: Credentials,
+    pub login_name: Option<String>,
     pub cursor_store: Arc<dyn CursorStore>,
     pub reconnect: bool,
     pub initial_reconnect_delay: Duration,
@@ -91,6 +92,34 @@ impl Config {
         Self {
             base_url: base_url.into(),
             credentials,
+            login_name: None,
+            cursor_store: default_cursor_store(),
+            reconnect: defaults.reconnect,
+            initial_reconnect_delay: defaults.initial_reconnect_delay,
+            max_reconnect_delay: defaults.max_reconnect_delay,
+            ping_interval: defaults.ping_interval,
+            request_timeout: defaults.request_timeout,
+            ack_messages: defaults.ack_messages,
+            transient_only: defaults.transient_only,
+            realtime_stream: defaults.realtime_stream,
+            event_channel_capacity: defaults.event_channel_capacity,
+        }
+    }
+
+    pub fn new_with_login_name(
+        base_url: impl Into<String>,
+        login_name: impl Into<String>,
+        password: PasswordInput,
+    ) -> Self {
+        let defaults = ClientConfigDefaults::default();
+        Self {
+            base_url: base_url.into(),
+            credentials: Credentials {
+                node_id: 0,
+                user_id: 0,
+                password,
+            },
+            login_name: Some(login_name.into()),
             cursor_store: default_cursor_store(),
             reconnect: defaults.reconnect,
             initial_reconnect_delay: defaults.initial_reconnect_delay,
@@ -156,12 +185,17 @@ enum RpcValue {
 }
 
 impl Client {
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(mut config: Config) -> Result<Self> {
         if config.base_url.trim().is_empty() {
             return Err(Error::validation("base_url is required"));
         }
-        validate_positive_i64(config.credentials.node_id, "credentials.node_id")?;
-        validate_positive_i64(config.credentials.user_id, "credentials.user_id")?;
+        if let Some(login_name) = config.login_name.take() {
+            validate_login_name(&login_name, "login_name")?;
+            config.login_name = Some(normalize_login_name(&login_name));
+        } else {
+            validate_positive_i64(config.credentials.node_id, "credentials.node_id")?;
+            validate_positive_i64(config.credentials.user_id, "credentials.user_id")?;
+        }
         config.credentials.password.validate()?;
 
         let http = HttpClient::new(config.base_url.clone())?;
@@ -221,6 +255,28 @@ impl Client {
         self.inner
             .http
             .login_with_password(node_id, user_id, password)
+            .await
+    }
+
+    pub async fn login_by_login_name(
+        &self,
+        login_name: impl AsRef<str>,
+        password: impl AsRef<str>,
+    ) -> Result<String> {
+        self.inner
+            .http
+            .login_by_login_name(login_name, password)
+            .await
+    }
+
+    pub async fn login_by_login_name_with_password(
+        &self,
+        login_name: impl AsRef<str>,
+        password: PasswordInput,
+    ) -> Result<String> {
+        self.inner
+            .http
+            .login_by_login_name_with_password(login_name, password)
             .await
     }
 
@@ -412,14 +468,28 @@ impl Client {
     }
 
     pub async fn create_user(&self, request: CreateUserRequest) -> Result<User> {
-        if request.username.is_empty() {
+        let CreateUserRequest {
+            username,
+            login_name,
+            password,
+            profile_json,
+            role,
+        } = request;
+        if username.is_empty() {
             return Err(Error::validation("username is required"));
         }
-        if request.role.is_empty() {
+        if role.is_empty() {
             return Err(Error::validation("role is required"));
         }
-        let password = request
-            .password
+        let login_name = login_name
+            .map(|value| normalize_login_name(&value))
+            .filter(|value| !value.is_empty());
+        if role.trim() == "channel" && login_name.is_some() {
+            return Err(Error::validation(
+                "login_name requires a login-enabled user",
+            ));
+        }
+        let password = password
             .as_ref()
             .map(|password| password.wire_value().map(str::to_owned))
             .transpose()?
@@ -429,10 +499,11 @@ impl Client {
                 body: Some(proto::client_envelope::Body::CreateUser(
                     proto::CreateUserRequest {
                         request_id,
-                        username: request.username,
+                        username,
                         password,
-                        profile_json: request.profile_json.into(),
-                        role: request.role,
+                        profile_json: profile_json.into(),
+                        role,
+                        login_name: login_name.unwrap_or_default(),
                     },
                 )),
             })
@@ -470,8 +541,22 @@ impl Client {
 
     pub async fn update_user(&self, target: UserRef, request: UpdateUserRequest) -> Result<User> {
         validate_user_ref(&target, "target")?;
-        let password = request
-            .password
+        let UpdateUserRequest {
+            username,
+            login_name,
+            password,
+            profile_json,
+            role,
+        } = request;
+        let login_name = login_name.map(|value| normalize_login_name(&value));
+        if role.as_deref().map(str::trim) == Some("channel")
+            && matches!(login_name.as_deref(), Some(value) if !value.is_empty())
+        {
+            return Err(Error::validation(
+                "login_name requires a login-enabled user",
+            ));
+        }
+        let password = password
             .as_ref()
             .map(|value| value.wire_value().map(str::to_owned))
             .transpose()?;
@@ -481,12 +566,13 @@ impl Client {
                     proto::UpdateUserRequest {
                         request_id,
                         user: Some(user_ref_to_proto(&target)),
-                        username: request.username.map(|value| proto::StringField { value }),
+                        username: username.map(|value| proto::StringField { value }),
+                        login_name: login_name.map(|value| proto::StringField { value }),
                         password: password.map(|value| proto::StringField { value }),
-                        profile_json: request.profile_json.map(|value| proto::BytesField {
+                        profile_json: profile_json.map(|value| proto::BytesField {
                             value: value.into(),
                         }),
-                        role: request.role.map(|value| proto::StringField { value }),
+                        role: role.map(|value| proto::StringField { value }),
                     },
                 )),
             })
@@ -981,12 +1067,18 @@ impl Inner {
             .await
             .map_err(|err| Error::connection("dial", err.to_string()))?;
 
+        let login_user = if self.cfg.login_name.is_some() {
+            None
+        } else {
+            Some(user_ref_to_proto(&UserRef {
+                node_id: self.cfg.credentials.node_id,
+                user_id: self.cfg.credentials.user_id,
+            }))
+        };
         let login = proto::ClientEnvelope {
             body: Some(proto::client_envelope::Body::Login(proto::LoginRequest {
-                user: Some(user_ref_to_proto(&UserRef {
-                    node_id: self.cfg.credentials.node_id,
-                    user_id: self.cfg.credentials.user_id,
-                })),
+                user: login_user,
+                login_name: self.cfg.login_name.clone().unwrap_or_default(),
                 password: self.cfg.credentials.password.wire_value()?.to_owned(),
                 seen_messages: seen_messages.iter().map(cursor_to_proto).collect(),
                 transient_only: self.cfg.transient_only,

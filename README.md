@@ -44,6 +44,13 @@ tokio-stream = "0.1"
 
 `plain_password(...)` 会在客户端本地把明文密码编码成服务端接受的 bcrypt 字符串；如果你已经持有编码后的密码值，可以使用 `hashed_password(...)`。
 
+HTTP 和 WebSocket 现在都支持两条登录路径：
+
+- 旧方式：`node_id + user_id + password`
+- 新方式：`login_name + password`
+
+`username` 仅用于展示和用户资料管理，不参与认证。
+
 ## 快速开始
 
 ### HTTP 客户端
@@ -61,6 +68,7 @@ async fn main() -> Result<(), turntf::Error> {
             &token,
             CreateUserRequest {
                 username: "alice".into(),
+                login_name: Some("alice.login".into()),
                 password: Some(plain_password("alice-password")?),
                 profile_json: br#"{"tier":"gold"}"#.to_vec(),
                 role: "user".into(),
@@ -71,6 +79,12 @@ async fn main() -> Result<(), turntf::Error> {
     println!("created user {}:{}", user.node_id, user.user_id);
     Ok(())
 }
+```
+
+如果你要走新的登录名认证，可以直接调用：
+
+```rust
+let token = client.login_by_login_name("root.login", "root-password").await?;
 ```
 
 ### 实时客户端
@@ -116,6 +130,16 @@ async fn main() -> Result<(), turntf::Error> {
 
     Ok(())
 }
+```
+
+如果长连接也要使用 `login_name` 登录，可以改用：
+
+```rust
+let client = Client::new(Config::new_with_login_name(
+    "http://127.0.0.1:8080",
+    "alice.login",
+    plain_password("alice-password")?,
+))?;
 ```
 
 ### 会话定向瞬时包

@@ -40,7 +40,7 @@
 它的特点是：
 
 - 每个请求都是独立 HTTP 调用
-- 登录通过 `POST /auth/login`
+- 登录通过 `POST /auth/login`，支持 `node_id + user_id + password` 或 `login_name + password`
 - 绝大多数方法都显式要求 `token: &str`
 - 负责 JSON 编解码、状态码映射、参数校验
 
@@ -64,13 +64,13 @@
 它的特点是：
 
 - 使用 WebSocket binary frame 发送 protobuf
-- 首帧登录使用用户密码，不走 HTTP token
+- 首帧登录使用用户密码，不走 HTTP token；支持用户 ID 选择器和 `login_name` 选择器
 - 通过 `tokio::sync::broadcast` 向多个订阅者分发 `ClientEvent`
 - 内部维护请求 ID、pending RPC、ping 循环和重连状态机
 
 ### 二者之间的桥接关系
 
-- `Client::login(...)` 与 `Client::login_with_password(...)` 本质上只是转调内部 `HttpClient`
+- `Client::login(...)`、`Client::login_with_password(...)`、`Client::login_by_login_name(...)` 和 `Client::login_by_login_name_with_password(...)` 本质上都是转调内部 `HttpClient`
 - `Client::http()` 可以拿到底层 `HttpClient` 的克隆，用于把 REST 能力和长连接能力放在同一个业务对象里使用
 - `Client` 的大部分查询/管理方法和 `HttpClient` 同名，但走的是长连接 RPC，不需要 token
 
@@ -79,7 +79,8 @@
 `Client::new(Config)` 会先做本地校验：
 
 - `base_url` 不能为空
-- `credentials.node_id` / `credentials.user_id` 必须大于 0
+- 当 `Config.login_name` 为空时，`credentials.node_id` / `credentials.user_id` 必须大于 0
+- 当 `Config.login_name` 非空时，会改走 `login_name + password` 登录
 - `credentials.password` 不能为空
 
 ### 连接地址映射
@@ -184,8 +185,7 @@ SDK 会基于 `base_url` 自动推导 WebSocket 地址：
 
 每次重连登录时，SDK 都会重新发送：
 
-- `credentials.node_id`
-- `credentials.user_id`
+- `credentials.node_id` / `credentials.user_id`，或者 `Config.login_name`
 - `credentials.password`
 - `cursor_store.load_seen_messages()` 返回的全部游标
 - `transient_only`
