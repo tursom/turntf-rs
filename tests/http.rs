@@ -708,6 +708,8 @@ async fn http_client_requests_and_encoding() {
                 user_id: 1025,
             },
             20,
+            None,
+            None,
         )
         .await
         .unwrap();

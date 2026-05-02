@@ -636,23 +636,35 @@ impl HttpClient {
     ///
     /// # 参数
     /// - `token` - 认证令牌
-    /// - `target` - 目标用户
+    /// - `target` - 目标用户（支持 `node_id=0, user_id=0` 表示当前用户）
     /// - `limit` - 返回消息的最大数量（0 表示使用服务器默认值）
+    /// - `peer_node_id` - 可选的会话对方节点 ID，用于 session 查询
+    /// - `peer_user_id` - 可选的会话对方用户 ID，用于 session 查询
     ///
     /// # Errors
-    /// 如果 `target` 无效，返回 `Error::Validation`。
+    /// 如果 `target` 的 node_id 或 user_id 为负数，返回 `Error::Validation`。
     pub async fn list_messages(
         &self,
         token: &str,
         target: UserRef,
         limit: i32,
+        peer_node_id: Option<i64>,
+        peer_user_id: Option<i64>,
     ) -> Result<Vec<Message>> {
-        validate_user_ref(&target, "target")?;
-        let suffix = if limit > 0 {
-            format!("?limit={limit}")
-        } else {
-            String::new()
-        };
+        if target.node_id < 0 {
+            return Err(Error::validation("target.node_id must not be negative"));
+        }
+        if target.user_id < 0 {
+            return Err(Error::validation("target.user_id must not be negative"));
+        }
+        let mut suffix = String::new();
+        if limit > 0 {
+            suffix.push_str(&format!("?limit={limit}"));
+        }
+        if let (Some(peer_nid), Some(peer_uid)) = (peer_node_id, peer_user_id) {
+            let sep = if suffix.is_empty() { "?" } else { "&" };
+            suffix.push_str(&format!("{sep}peer_node_id={peer_nid}&peer_user_id={peer_uid}"));
+        }
         let response = self
             .request_json(
                 Method::GET,
