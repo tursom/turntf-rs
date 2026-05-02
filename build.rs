@@ -1,7 +1,9 @@
 fn main() {
-    let proto = "proto/client.proto";
+    let protos = &["proto/client.proto", "proto/relay.proto"];
 
-    println!("cargo:rerun-if-changed={proto}");
+    for proto in protos {
+        println!("cargo:rerun-if-changed={proto}");
+    }
 
     let protoc = protoc_bin_vendored::protoc_bin_path().expect("vendored protoc");
     std::env::set_var("PROTOC", protoc);
@@ -9,6 +11,6 @@ fn main() {
     let mut config = prost_build::Config::new();
     config.bytes(["."]);
     config
-        .compile_protos(&[proto], &["proto"])
+        .compile_protos(protos, &["proto"])
         .expect("compile proto");
 }

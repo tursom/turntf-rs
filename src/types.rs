@@ -663,3 +663,222 @@ impl Default for ClientConfigDefaults {
 pub fn default_cursor_store() -> std::sync::Arc<dyn CursorStore> {
     std::sync::Arc::new(MemoryCursorStore::new())
 }
+
+// ===== Relay 类型 =====
+
+/// RelayConnection 的可靠性等级。
+///
+/// - `BestEffort` — 无 ACK，无重传，无去重，无排序。延迟最低，适合实时音视频帧。
+/// - `AtLeastOnce` — ACK + 重传，不保证去重和排序。适合幂等指令。
+/// - `ReliableOrdered` — ACK + 重传 + 去重 + 严格有序。适合文件传输和聊天消息。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reliability {
+    /// 尽最大努力，无 ACK / 重传 / 去重 / 排序
+    BestEffort = 0,
+    /// ACK + 重传，不保证去重和排序
+    #[default]
+    AtLeastOnce = 1,
+    /// ACK + 重传 + 去重 + 严格有序
+    ReliableOrdered = 2,
+}
+
+/// RelayConnection 的当前状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RelayState {
+    /// 初始状态或已关闭
+    #[default]
+    Closed = 0,
+    /// 已发送 OPEN，等待 OPEN_ACK
+    Opening = 1,
+    /// 连接已建立，可收发数据
+    Open = 2,
+    /// 已发送 CLOSE，等待确认
+    Closing = 3,
+}
+
+/// Relay 协议帧的类型枚举。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelayKind {
+    Unspecified = 0,
+    Open = 1,
+    OpenAck = 2,
+    Data = 3,
+    Ack = 4,
+    Close = 5,
+    Ping = 6,
+    Error = 7,
+}
+
+/// RelayConnection 的配置。
+///
+/// 使用 `RelayConfig::builder()` 创建配置实例。
+#[derive(Clone, Debug)]
+pub struct RelayConfig {
+    /// 可靠性等级，默认 `ReliableOrdered`。
+    pub reliability: Reliability,
+    /// 发送窗口大小（在途未确认帧数上限），范围 1-256，默认 16。
+    /// BestEffort 模式下忽略此配置。
+    pub window_size: u64,
+    /// OPEN 等待 OPEN_ACK 超时毫秒数，默认 10000。
+    pub open_timeout_ms: u64,
+    /// CLOSE 等待确认超时毫秒数，默认 5000。
+    pub close_timeout_ms: u64,
+    /// DATA 等待 ACK 超时毫秒数，默认 3000。
+    /// BestEffort 模式下忽略此配置。
+    pub ack_timeout_ms: u64,
+    /// 最大重传次数，默认 5。
+    /// BestEffort 模式下忽略此配置。
+    pub max_retransmits: u32,
+    /// 无数据超时断开毫秒数，0 表示不超时（默认）。
+    pub idle_timeout_ms: u64,
+    /// Send 操作超时毫秒数（缓冲区满时等待上限），0 表示不超时（默认）。
+    pub send_timeout_ms: u64,
+    /// Receive 操作超时毫秒数（无数据等待上限），0 表示不超时（默认）。
+    pub receive_timeout_ms: u64,
+    /// 发送缓冲区字节数，默认 65536。
+    pub send_buffer_size: usize,
+    /// Packet 投递模式，默认 `RouteRetry`。
+    pub delivery_mode: DeliveryMode,
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            reliability: Reliability::ReliableOrdered,
+            window_size: 16,
+            open_timeout_ms: 10000,
+            close_timeout_ms: 5000,
+            ack_timeout_ms: 3000,
+            max_retransmits: 5,
+            idle_timeout_ms: 0,
+            send_timeout_ms: 0,
+            receive_timeout_ms: 0,
+            send_buffer_size: 65536,
+            delivery_mode: DeliveryMode::RouteRetry,
+        }
+    }
+}
+
+impl RelayConfig {
+    /// 返回可链式调用的 Builder。
+    pub fn builder() -> RelayConfigBuilder {
+        RelayConfigBuilder::default()
+    }
+}
+
+/// RelayConfig 的 Builder。
+#[derive(Clone, Debug, Default)]
+pub struct RelayConfigBuilder {
+    config: RelayConfig,
+}
+
+impl RelayConfigBuilder {
+    /// 设置可靠性等级。
+    pub fn reliability(mut self, v: Reliability) -> Self {
+        self.config.reliability = v;
+        self
+    }
+
+    /// 设置发送窗口大小。
+    pub fn window_size(mut self, v: u64) -> Self {
+        self.config.window_size = v;
+        self
+    }
+
+    /// 设置 OPEN 超时毫秒数。
+    pub fn open_timeout_ms(mut self, v: u64) -> Self {
+        self.config.open_timeout_ms = v;
+        self
+    }
+
+    /// 设置 ACK 超时毫秒数。
+    pub fn ack_timeout_ms(mut self, v: u64) -> Self {
+        self.config.ack_timeout_ms = v;
+        self
+    }
+
+    /// 设置最大重传次数。
+    pub fn max_retransmits(mut self, v: u32) -> Self {
+        self.config.max_retransmits = v;
+        self
+    }
+
+    /// 设置空闲超时（毫秒），0 表示不超时。
+    pub fn idle_timeout_ms(mut self, v: u64) -> Self {
+        self.config.idle_timeout_ms = v;
+        self
+    }
+
+    /// 设置发送超时毫秒数，0 表示不超时。
+    pub fn send_timeout_ms(mut self, v: u64) -> Self {
+        self.config.send_timeout_ms = v;
+        self
+    }
+
+    /// 设置接收超时毫秒数，0 表示不超时。
+    pub fn receive_timeout_ms(mut self, v: u64) -> Self {
+        self.config.receive_timeout_ms = v;
+        self
+    }
+
+    /// 设置 Packet 投递模式。
+    pub fn delivery_mode(mut self, v: DeliveryMode) -> Self {
+        self.config.delivery_mode = v;
+        self
+    }
+
+    /// 构建最终的 RelayConfig。
+    pub fn build(self) -> RelayConfig {
+        self.config
+    }
+}
+
+/// Relay 协议帧，与 proto RelayEnvelope 对应。
+#[derive(Clone, Debug)]
+pub struct RelayEnvelope {
+    pub relay_id: String,
+    pub kind: RelayKind,
+    pub sender_session: SessionRef,
+    pub target_session: SessionRef,
+    pub seq: u64,
+    pub ack_seq: u64,
+    pub payload: Vec<u8>,
+    pub sent_at_ms: i64,
+}
+
+/// Relay 层的错误。
+#[derive(Clone, Debug)]
+pub struct RelayError {
+    pub code: String,
+    pub message: String,
+}
+
+impl RelayError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for RelayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "relay: {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for RelayError {}
+
+// 预定义的 relay 错误码
+pub const RELAY_ERROR_OPEN_TIMEOUT: &str = "open_timeout";
+pub const RELAY_ERROR_ACK_TIMEOUT: &str = "ack_timeout";
+pub const RELAY_ERROR_MAX_RETRANSMIT: &str = "max_retransmit";
+pub const RELAY_ERROR_IDLE_TIMEOUT: &str = "idle_timeout";
+pub const RELAY_ERROR_REMOTE_CLOSE: &str = "remote_close";
+pub const RELAY_ERROR_CLIENT_CLOSED: &str = "client_closed";
+pub const RELAY_ERROR_PROTOCOL: &str = "protocol_error";
+pub const RELAY_ERROR_DUPLICATE_OPEN: &str = "duplicate_open";
+pub const RELAY_ERROR_NOT_CONNECTED: &str = "not_connected";
+pub const RELAY_ERROR_SEND_TIMEOUT: &str = "send_timeout";
+pub const RELAY_ERROR_RECEIVE_TIMEOUT: &str = "receive_timeout";

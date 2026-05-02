@@ -54,13 +54,15 @@ mod errors;
 mod http;
 mod mapping;
 mod password;
+mod relay;
 mod store;
 mod types;
 mod validation;
 
-/// Protobuf 生成的代码模块，包含客户端与服务器通信的协议定义。
+/// Protobuf 生成的代码模块，包含客户端与服务器通信的协议定义和 relay 协议。
 pub(crate) mod proto {
     include!(concat!(env!("OUT_DIR"), "/notifier.client.v1.rs"));
+    include!(concat!(env!("OUT_DIR"), "/notifier.relay.v1.rs"));
 }
 
 // === 公开 API 重导出 ===
@@ -73,11 +75,13 @@ pub use errors::{
 pub use http::HttpClient;
 pub use password::{hash_password, hashed_password, plain_password, PasswordInput, PasswordSource};
 pub use store::{BoxError, CursorStore, MemoryCursorStore};
+pub use relay::{Relay, RelayConnection};
 pub use types::{
     Attachment, AttachmentType, BlacklistEntry, ClusterNode, CreateUserRequest, Credentials,
     DeleteUserResult, DeliveryMode, Event, EventLogTrimStatus, LoggedInUser, LoginInfo, Message,
     MessageCursor, MessageTrimStatus, OnlineNodePresence, OperationsStatus, Packet,
-    PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted, ResolvedSession,
+    PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted, RelayConfig, RelayConfigBuilder,
+    RelayEnvelope, RelayError, RelayKind, RelayState, Reliability, ResolvedSession,
     ResolvedUserSessions, ScanUserMetadataRequest, SessionRef, Subscription, UpdateUserRequest,
     UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult, UserRef,
 };

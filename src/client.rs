@@ -33,10 +33,10 @@ use crate::proto;
 use crate::store::CursorStore;
 use crate::types::{
     default_cursor_store, Attachment, AttachmentType, BlacklistEntry, ClientConfigDefaults,
-    ClusterNode, CreateUserRequest, Credentials, DeleteUserResult, DeliveryMode, Event,
-    LoggedInUser, LoginInfo, Message, OperationsStatus, RelayAccepted, ResolvedUserSessions,
-    ScanUserMetadataRequest, SessionRef, Subscription, UpdateUserRequest,
-    UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult, UserRef,
+    ClusterNode, CreateUserRequest, Credentials, DeleteUserResult, DeliveryMode, Event, LoggedInUser,
+    LoginInfo, Message, OperationsStatus, Packet, RelayAccepted, ResolvedUserSessions,
+    ScanUserMetadataRequest, SessionRef, Subscription, UpdateUserRequest, UpsertUserMetadataRequest,
+    User, UserMetadata, UserMetadataScanResult, UserRef,
 };
 use crate::validation::{
     normalize_login_name, validate_delivery_mode, validate_login_name,
@@ -238,29 +238,6 @@ impl Config {
         let defaults = ClientConfigDefaults::default();
         Self {
             base_url: base_url.into(),
-            credentials,
-            login_name: None,
-            cursor_store: default_cursor_store(),
-            reconnect: defaults.reconnect,
-            initial_reconnect_delay: defaults.initial_reconnect_delay,
-            max_reconnect_delay: defaults.max_reconnect_delay,
-            ping_interval: defaults.ping_interval,
-            request_timeout: defaults.request_timeout,
-            ack_messages: defaults.ack_messages,
-            transient_only: defaults.transient_only,
-            realtime_stream: defaults.realtime_stream,
-            event_channel_capacity: defaults.event_channel_capacity,
-        }
-    }
-
-    pub fn new_with_login_name(
-        base_url: impl Into<String>,
-        login_name: impl Into<String>,
-        password: PasswordInput,
-    ) -> Self {
-        let defaults = ClientConfigDefaults::default();
-        Self {
-            base_url: base_url.into(),
             credentials: Credentials {
                 node_id: 0,
                 user_id: 0,
@@ -337,6 +314,9 @@ struct Inner {
     state_notify: Notify,
     request_id: AtomicU64,
     connection_id: AtomicU64,
+    relay_packet_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Packet>>>,
+    /// 登录后存储的会话信息，供 relay 等模块使用。
+    login_info: RwLock<Option<LoginInfo>>,
 }
 
 struct ActiveWriter {
@@ -425,6 +405,8 @@ impl Client {
                 state_notify: Notify::new(),
                 request_id: AtomicU64::new(0),
                 connection_id: AtomicU64::new(0),
+                relay_packet_tx: Mutex::new(None),
+                login_info: RwLock::new(None),
             }),
         })
     }
@@ -1559,6 +1541,27 @@ impl Client {
         }));
     }
 
+    /// 设置 relay 包传输通道。当收到数据包时，如果通道存在，数据包会被发送到 relay 处理，
+    /// 不会继续作为 `ClientEvent::Packet` 发出。
+    ///
+    /// 此方法由 Relay 内部调用，通常不需要用户直接使用。
+    pub async fn set_relay_packet_tx(
+        &self,
+        tx: Option<tokio::sync::mpsc::UnboundedSender<Packet>>,
+    ) {
+        *self.inner.relay_packet_tx.lock().await = tx;
+    }
+
+    /// 返回当前登录的会话引用。如果未登录，返回 `None`。
+    pub async fn session_ref(&self) -> Option<SessionRef> {
+        self.inner
+            .login_info
+            .read()
+            .await
+            .as_ref()
+            .map(|info| info.session_ref.clone())
+    }
+
     async fn rpc<F>(&self, build: F) -> Result<RpcValue>
     where
         F: FnOnce(u64) -> proto::ClientEnvelope,
@@ -1641,6 +1644,7 @@ impl Inner {
             sink: writer,
         });
         self.set_connected(true).await;
+        *self.login_info.write().await = Some(login_info.clone());
         self.emit_event(ClientEvent::Login(login_info)).await;
 
         let ping_task = {
@@ -1707,10 +1711,17 @@ impl Inner {
                 self.emit_event(ClientEvent::Message(message)).await;
             }
             Some(proto::server_envelope::Body::PacketPushed(packet)) => {
-                self.emit_event(ClientEvent::Packet(packet_from_proto(
-                    packet.packet.as_ref(),
-                )?))
-                .await;
+                let pkt = packet_from_proto(packet.packet.as_ref())?;
+                let consumed = {
+                    let tx = self.relay_packet_tx.lock().await;
+                    match tx.as_ref() {
+                        Some(tx) => tx.send(pkt.clone()).is_ok(),
+                        None => false,
+                    }
+                };
+                if !consumed {
+                    self.emit_event(ClientEvent::Packet(pkt)).await;
+                }
             }
             Some(proto::server_envelope::Body::SendMessageResponse(response)) => {
                 let result = match response.body {
