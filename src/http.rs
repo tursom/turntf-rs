@@ -24,6 +24,21 @@ use crate::validation::{
     validate_user_metadata_key, validate_user_metadata_scan_limit, validate_user_ref,
 };
 
+/// HTTP 客户端，用于通过 REST API 与 turntf 服务器通信。
+///
+/// `HttpClient` 提供了基于 HTTP REST 的 API 操作，包括用户认证、用户管理、
+/// 元数据管理、消息收发、频道订阅和集群状态查询等功能。
+///
+/// 每个 API 请求需要提供认证令牌（token），可通过 `login` 或 `login_by_login_name` 获取。
+///
+/// # 示例
+///
+/// ```ignore
+/// use turntf::HttpClient;
+///
+/// let client = HttpClient::new("http://localhost:8080")?;
+/// let token = client.login(1, 42, "password").await?;
+/// ```
 #[derive(Clone, Debug)]
 pub struct HttpClient {
     base_url: String,
@@ -31,6 +46,16 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
+    /// 创建一个新的 `HttpClient` 实例。
+    ///
+    /// 默认使用 `reqwest` 客户端，禁用系统代理。
+    ///
+    /// # 参数
+    /// - `base_url` - 服务器的基础 URL，如 `"http://localhost:8080"`
+    ///
+    /// # Errors
+    /// 如果 `base_url` 为空或空字符串，返回 `Error::Validation`。
+    /// 如果 HTTP 客户端初始化失败，返回 `Error::Connection`。
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         let client = ReqwestClient::builder()
             .no_proxy()
@@ -47,10 +72,26 @@ impl HttpClient {
         Ok(Self { base_url, client })
     }
 
+    /// 获取当前 HTTP 客户端的基础 URL。
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
+    /// 使用节点 ID 和用户 ID 进行登录。
+    ///
+    /// 这是使用明文密码的便捷方法，内部会自动对密码进行 bcrypt 哈希处理。
+    ///
+    /// # 参数
+    /// - `node_id` - 节点 ID（必须为正数）
+    /// - `user_id` - 用户 ID（必须为正数）
+    /// - `password` - 明文密码
+    ///
+    /// # 返回值
+    /// 成功时返回认证令牌字符串。
+    ///
+    /// # Errors
+    /// 如果 `node_id` 或 `user_id` 无效（小于等于 0），返回 `Error::Validation`。
+    /// 如果密码为空或服务器认证失败，返回相应的错误。
     pub async fn login(
         &self,
         node_id: i64,
@@ -61,6 +102,19 @@ impl HttpClient {
             .await
     }
 
+    /// 使用节点 ID、用户 ID 和已处理的密码输入进行登录。
+    ///
+    /// # 参数
+    /// - `node_id` - 节点 ID（必须为正数）
+    /// - `user_id` - 用户 ID（必须为正数）
+    /// - `password` - 密码输入（可使用 `plain_password()` 或 `hashed_password()` 创建）
+    ///
+    /// # 返回值
+    /// 成功时返回认证令牌字符串。
+    ///
+    /// # Errors
+    /// 如果 `node_id` 或 `user_id` 无效，返回 `Error::Validation`。
+    /// 如果服务器认证失败，返回相应的错误。
     pub async fn login_with_password(
         &self,
         node_id: i64,
@@ -81,6 +135,18 @@ impl HttpClient {
         .await
     }
 
+    /// 使用登录名和明文密码进行登录。
+    ///
+    /// # 参数
+    /// - `login_name` - 用户的登录名
+    /// - `password` - 明文密码
+    ///
+    /// # 返回值
+    /// 成功时返回认证令牌字符串。
+    ///
+    /// # Errors
+    /// 如果登录名为空，返回 `Error::Validation`。
+    /// 如果服务器认证失败，返回相应的错误。
     pub async fn login_by_login_name(
         &self,
         login_name: impl AsRef<str>,
@@ -93,6 +159,18 @@ impl HttpClient {
         .await
     }
 
+    /// 使用登录名和已处理的密码输入进行登录。
+    ///
+    /// # 参数
+    /// - `login_name` - 用户的登录名
+    /// - `password` - 密码输入
+    ///
+    /// # 返回值
+    /// 成功时返回认证令牌字符串。
+    ///
+    /// # Errors
+    /// 如果登录名为空，返回 `Error::Validation`。
+    /// 如果服务器认证失败，返回相应的错误。
     pub async fn login_by_login_name_with_password(
         &self,
         login_name: impl AsRef<str>,
@@ -110,6 +188,16 @@ impl HttpClient {
         .await
     }
 
+    /// 创建新用户。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `request` - 创建用户的请求参数
+    ///
+    /// # Errors
+    /// 如果 `username` 或 `role` 为空，返回 `Error::Validation`。
+    /// 如果角色为 `"channel"` 但提供了 `login_name`，返回 `Error::Validation`。
+    /// 如果服务器处理失败，返回相应的错误。
     pub async fn create_user(&self, token: &str, request: CreateUserRequest) -> Result<User> {
         let CreateUserRequest {
             username,
@@ -164,6 +252,16 @@ impl HttpClient {
         user_from_http(expect_object(&response)?)
     }
 
+    /// 创建频道（角色为 `"channel"` 的用户）。
+    ///
+    /// 这是 `create_user` 的便捷方法，会自动将角色设置为 `"channel"`。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `request` - 创建用户的请求参数（角色会被自动覆盖为 `"channel"`）
+    ///
+    /// # Errors
+    /// 同 `create_user`。
     pub async fn create_channel(
         &self,
         token: &str,
@@ -175,6 +273,15 @@ impl HttpClient {
         self.create_user(token, request).await
     }
 
+    /// 获取用户信息。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `target` - 目标用户引用
+    ///
+    /// # Errors
+    /// 如果 `target` 的 `node_id` 或 `user_id` 无效，返回 `Error::Validation`。
+    /// 如果用户不存在或权限不足，返回相应的服务器错误。
     pub async fn get_user(&self, token: &str, target: UserRef) -> Result<User> {
         validate_user_ref(&target, "target")?;
         let response = self
@@ -189,6 +296,18 @@ impl HttpClient {
         user_from_http(expect_object(&response)?)
     }
 
+    /// 更新用户信息。
+    ///
+    /// 所有字段均为可选，只更新提供的字段。未提供的字段保持不变。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `target` - 目标用户引用
+    /// - `request` - 更新请求，包含要更新的字段
+    ///
+    /// # Errors
+    /// 如果 `target` 无效，返回 `Error::Validation`。
+    /// 如果角色为 `"channel"` 但提供了 `login_name`，返回 `Error::Validation`。
     pub async fn update_user(
         &self,
         token: &str,
@@ -246,6 +365,15 @@ impl HttpClient {
         user_from_http(expect_object(&response)?)
     }
 
+    /// 删除用户。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `target` - 要删除的目标用户引用
+    ///
+    /// # Errors
+    /// 如果 `target` 无效，返回 `Error::Validation`。
+    /// 如果用户不存在或权限不足，返回相应的服务器错误。
     pub async fn delete_user(&self, token: &str, target: UserRef) -> Result<DeleteUserResult> {
         validate_user_ref(&target, "target")?;
         let response = self
@@ -260,6 +388,15 @@ impl HttpClient {
         delete_user_result_from_http(expect_object(&response)?)
     }
 
+    /// 获取用户元数据。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 元数据所属的用户
+    /// - `key` - 元数据键名
+    ///
+    /// # Errors
+    /// 如果 `owner` 无效或 `key` 格式不正确，返回 `Error::Validation`。
     pub async fn get_user_metadata(
         &self,
         token: &str,
@@ -284,6 +421,18 @@ impl HttpClient {
         user_metadata_from_http(expect_object(&response)?)
     }
 
+    /// 创建或更新用户元数据。
+    ///
+    /// 如果指定键的元数据已存在，则更新其值；否则创建新的元数据条目。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 元数据所属的用户
+    /// - `key` - 元数据键名
+    /// - `request` - 元数据值及过期时间
+    ///
+    /// # Errors
+    /// 如果 `owner` 无效或 `key` 格式不正确，返回 `Error::Validation`。
     pub async fn upsert_user_metadata(
         &self,
         token: &str,
@@ -315,6 +464,15 @@ impl HttpClient {
         user_metadata_from_http(expect_object(&response)?)
     }
 
+    /// 删除用户元数据。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 元数据所属的用户
+    /// - `key` - 要删除的元数据键名
+    ///
+    /// # Errors
+    /// 如果 `owner` 无效或 `key` 格式不正确，返回 `Error::Validation`。
     pub async fn delete_user_metadata(
         &self,
         token: &str,
@@ -339,6 +497,17 @@ impl HttpClient {
         user_metadata_from_http(expect_object(&response)?)
     }
 
+    /// 扫描用户元数据。
+    ///
+    /// 支持按前缀过滤和分页查询。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 元数据所属的用户
+    /// - `request` - 扫描参数（前缀、分页游标、限制数）
+    ///
+    /// # Errors
+    /// 如果参数无效（如 limit 超出范围），返回 `Error::Validation`。
     pub async fn scan_user_metadata(
         &self,
         token: &str,
@@ -380,6 +549,15 @@ impl HttpClient {
         user_metadata_scan_result_from_http(expect_object(&response)?)
     }
 
+    /// 创建频道订阅关系。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `user` - 订阅者
+    /// - `channel` - 被订阅的频道
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn create_subscription(
         &self,
         token: &str,
@@ -398,6 +576,7 @@ impl HttpClient {
         Ok(subscription_from_attachment(&attachment))
     }
 
+    /// 订阅频道（`create_subscription` 的别名）。
     pub async fn subscribe_channel(
         &self,
         token: &str,
@@ -407,6 +586,15 @@ impl HttpClient {
         self.create_subscription(token, subscriber, channel).await
     }
 
+    /// 取消订阅频道。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `subscriber` - 订阅者
+    /// - `channel` - 要取消订阅的频道
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn unsubscribe_channel(
         &self,
         token: &str,
@@ -424,6 +612,14 @@ impl HttpClient {
         Ok(subscription_from_attachment(&attachment))
     }
 
+    /// 获取用户的所有频道订阅列表。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `subscriber` - 订阅者
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn list_subscriptions(
         &self,
         token: &str,
@@ -436,6 +632,15 @@ impl HttpClient {
             .collect()
     }
 
+    /// 获取目标用户的消息列表。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `target` - 目标用户
+    /// - `limit` - 返回消息的最大数量（0 表示使用服务器默认值）
+    ///
+    /// # Errors
+    /// 如果 `target` 无效，返回 `Error::Validation`。
     pub async fn list_messages(
         &self,
         token: &str,
@@ -467,6 +672,17 @@ impl HttpClient {
             .collect()
     }
 
+    /// 发送持久化消息。
+    ///
+    /// 消息会被服务器持久化存储，并通过 WebSocket 推送给目标用户。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `target` - 目标用户
+    /// - `body` - 消息体内容（字节数组，base64 编码传输）
+    ///
+    /// # Errors
+    /// 如果 `target` 无效或 `body` 为空，返回 `Error::Validation`。
     pub async fn post_message(
         &self,
         token: &str,
@@ -496,6 +712,20 @@ impl HttpClient {
         message_from_http(expect_object(&response)?)
     }
 
+    /// 发送瞬时数据包（非持久化消息）。
+    ///
+    /// 数据包不会被持久化存储，适用于实时通信场景。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `target_node_id` - 目标节点 ID
+    /// - `relay_target` - 中继目标用户
+    /// - `body` - 数据包体内容（字节数组）
+    /// - `mode` - 投递模式（`BestEffort` 或 `RouteRetry`）
+    ///
+    /// # Errors
+    /// 如果参数无效，返回 `Error::Validation`。
+    /// `target_node_id` 必须与 `relay_target.node_id` 一致。
     pub async fn post_packet(
         &self,
         token: &str,
@@ -536,6 +766,10 @@ impl HttpClient {
         relay_accepted_from_http(expect_object(&response)?)
     }
 
+    /// 获取集群节点列表。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
     pub async fn list_cluster_nodes(&self, token: &str) -> Result<Vec<ClusterNode>> {
         let response = self
             .request_json(Method::GET, "/cluster/nodes", token, None, &[200])
@@ -547,6 +781,14 @@ impl HttpClient {
             .collect()
     }
 
+    /// 获取指定节点的已登录用户列表。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `node_id` - 要查询的节点 ID
+    ///
+    /// # Errors
+    /// 如果 `node_id` 无效（小于等于 0），返回 `Error::Validation`。
     pub async fn list_node_logged_in_users(
         &self,
         token: &str,
@@ -569,6 +811,7 @@ impl HttpClient {
             .collect()
     }
 
+    /// 使用请求体执行登录（内部方法）。
     async fn login_with_body(&self, body: Map<String, Value>) -> Result<String> {
         let response = self
             .request_json(
@@ -586,6 +829,17 @@ impl HttpClient {
         }
     }
 
+    /// 屏蔽用户。
+    ///
+    /// 将指定用户加入黑名单。被屏蔽的用户将无法向屏蔽者发送消息。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 黑名单所有者
+    /// - `blocked` - 要被屏蔽的用户
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn block_user(
         &self,
         token: &str,
@@ -604,6 +858,15 @@ impl HttpClient {
         Ok(blacklist_entry_from_attachment(&attachment))
     }
 
+    /// 解除用户屏蔽。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 黑名单所有者
+    /// - `blocked` - 要解除屏蔽的用户
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn unblock_user(
         &self,
         token: &str,
@@ -616,6 +879,14 @@ impl HttpClient {
         Ok(blacklist_entry_from_attachment(&attachment))
     }
 
+    /// 获取用户的黑名单列表。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 黑名单所有者
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn list_blocked_users(
         &self,
         token: &str,
@@ -628,6 +899,19 @@ impl HttpClient {
             .collect()
     }
 
+    /// 创建或更新用户附件。
+    ///
+    /// 附件用于记录用户之间的关联关系，如频道订阅、黑名单等。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 附件所有者
+    /// - `subject` - 附件主题用户
+    /// - `attachment_type` - 附件类型
+    /// - `config_json` - 附件的 JSON 配置（空字节数组表示空对象）
+    ///
+    /// # Errors
+    /// 如果用户引用无效或 `config_json` 不是有效 JSON，返回 `Error::Validation`。
     pub async fn upsert_attachment(
         &self,
         token: &str,
@@ -665,6 +949,16 @@ impl HttpClient {
         attachment_from_http(expect_object(&response)?)
     }
 
+    /// 删除用户附件。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 附件所有者
+    /// - `subject` - 附件主题用户
+    /// - `attachment_type` - 附件类型
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn delete_attachment(
         &self,
         token: &str,
@@ -693,6 +987,15 @@ impl HttpClient {
         attachment_from_http(expect_object(&response)?)
     }
 
+    /// 获取用户的附件列表。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `owner` - 附件所有者
+    /// - `attachment_type` - 可选的附件类型过滤（`None` 表示返回所有类型）
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn list_attachments(
         &self,
         token: &str,
@@ -722,6 +1025,12 @@ impl HttpClient {
             .collect()
     }
 
+    /// 获取事件日志列表。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `after` - 起始事件序列号（0 表示从最新开始）
+    /// - `limit` - 返回事件的最大数量（0 表示使用服务器默认值）
     pub async fn list_events(&self, token: &str, after: i64, limit: i32) -> Result<Vec<Event>> {
         let mut params = Vec::new();
         if after != 0 {
@@ -751,6 +1060,10 @@ impl HttpClient {
             .collect()
     }
 
+    /// 获取集群节点的运行状态。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
     pub async fn operations_status(&self, token: &str) -> Result<OperationsStatus> {
         let response = self
             .request_json(Method::GET, "/ops/status", token, None, &[200])
@@ -758,11 +1071,19 @@ impl HttpClient {
         operations_status_from_http(expect_object(&response)?)
     }
 
+    /// 获取节点的监控指标文本。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    ///
+    /// # 返回值
+    /// 返回 Prometheus 格式的监控指标文本。
     pub async fn metrics(&self, token: &str) -> Result<String> {
         self.request_text(Method::GET, "/metrics", token, None, &[200])
             .await
     }
 
+    /// 发送 HTTP 请求并解析 JSON 响应。
     async fn request_json(
         &self,
         method: Method,
@@ -781,6 +1102,10 @@ impl HttpClient {
             .map_err(|err| Error::protocol(format!("invalid JSON response: {err}")))
     }
 
+    /// 发送 HTTP 请求并获取原始文本响应。
+    ///
+    /// 这是所有 HTTP 请求调用的核心方法。处理认证头、请求体序列化、
+    /// 响应状态码检查和错误转换。
     async fn request_text(
         &self,
         method: Method,
@@ -830,6 +1155,13 @@ impl HttpClient {
     }
 }
 
+/// 将 HTTP 状态码转换为对应的错误码字符串。
+///
+/// # 参数
+/// - `status` - HTTP 状态码
+///
+/// # 返回值
+/// 对应的错误码字符串，如 `"bad_request"`、`"unauthorized"` 等。
 fn response_status_code(status: u16) -> &'static str {
     match status {
         400 => "bad_request",

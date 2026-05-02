@@ -49,14 +49,51 @@ type WsWriter = SplitSink<WsStream, WsMessage>;
 type WsReader = SplitStream<WsStream>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// 客户端事件枚举，表示 WebSocket 连接上发生的各种事件。
+///
+/// 通过 `Client::subscribe()` 订阅事件流，然后异步迭代接收事件。
+///
+/// # 事件类型
+/// - `Login` - 登录成功事件
+/// - `Message` - 收到新的持久化消息
+/// - `Packet` - 收到瞬时数据包
+/// - `Error` - 连接或协议错误
+/// - `Disconnect` - 连接断开事件
+///
+/// # 示例
+///
+/// ```ignore
+/// let mut events = client.subscribe().await;
+/// while let Some(Ok(event)) = events.next().await {
+///     match event {
+///         ClientEvent::Login(info) => println!("登录成功: {:?}", info),
+///         ClientEvent::Message(msg) => println!("收到消息: {:?}", msg),
+///         ClientEvent::Packet(pkt) => println!("收到数据包: {:?}", pkt),
+///         ClientEvent::Error(err) => eprintln!("错误: {err}"),
+///         ClientEvent::Disconnect(err) => eprintln!("断开: {err}"),
+///     }
+/// }
+/// ```
 pub enum ClientEvent {
+    /// 登录成功事件，包含登录信息（用户信息、协议版本、会话引用）
     Login(LoginInfo),
+    /// 收到新的持久化消息
     Message(Message),
+    /// 收到瞬时数据包
     Packet(crate::types::Packet),
+    /// 连接或协议错误
     Error(Error),
+    /// 连接断开事件，包含断开原因
     Disconnect(Error),
 }
 
+/// 客户端事件订阅流，实现了 `Stream` trait。
+///
+/// 通过 `Client::subscribe()` 创建。可以像异步迭代器一样使用，
+/// 通过 `StreamExt::next()` 方法获取下一个事件。
+///
+/// 内部使用 tokio 的 `broadcast` 通道，支持多个消费者。
+/// 如果消费者处理速度慢于事件产生速度，旧事件可能被丢弃。
 pub struct ClientSubscription {
     inner: BroadcastStream<ClientEvent>,
 }
@@ -69,25 +106,135 @@ impl Stream for ClientSubscription {
     }
 }
 
+/// 客户端配置，用于配置 `Client` 的行为。
+///
+/// 提供两种创建方式：
+/// - `new()` - 使用节点 ID + 用户 ID + 凭据
+/// - `new_with_login_name()` - 使用登录名 + 密码
+///
+/// # 配置项说明
+///
+/// | 配置项 | 默认值 | 说明 |
+/// |--------|--------|------|
+/// | `reconnect` | `true` | 是否启用自动重连 |
+/// | `initial_reconnect_delay` | 1 秒 | 初始重连延迟 |
+/// | `max_reconnect_delay` | 30 秒 | 最大重连延迟 |
+/// | `ping_interval` | 30 秒 | WebSocket 心跳间隔 |
+/// | `request_timeout` | 10 秒 | RPC 请求超时时间 |
+/// | `ack_messages` | `true` | 是否自动确认消息 |
+/// | `transient_only` | `false` | 是否仅接收瞬时消息 |
+/// | `realtime_stream` | `false` | 是否连接实时流端点 |
+/// | `event_channel_capacity` | 256 | 事件通道缓冲容量 |
+///
+/// # 示例
+///
+/// ```ignore
+/// use turntf::{Client, Config};
+/// use turntf::password::plain_password;
+///
+/// // 使用节点 ID + 用户 ID
+/// let config = Config::new("http://localhost:8080", Credentials {
+///     node_id: 1,
+///     user_id: 42,
+///     password: plain_password("secret")?,
+/// });
+///
+/// // 使用登录名
+/// let config = Config::new_with_login_name(
+///     "http://localhost:8080",
+///     "alice",
+///     plain_password("secret")?,
+/// );
+/// ```
 #[derive(Clone)]
 pub struct Config {
+    /// 服务器基础 URL，如 `"http://localhost:8080"`
     pub base_url: String,
+    /// 用户凭据（节点 ID、用户 ID、密码）
     pub credentials: Credentials,
+    /// 登录名（可选，使用登录名方式认证时设置）
     pub login_name: Option<String>,
+    /// 游标存储实现，用于消息去重
     pub cursor_store: Arc<dyn CursorStore>,
+    /// 是否启用自动重连（默认：`true`）
     pub reconnect: bool,
+    /// 初始重连延迟（默认：1 秒）
     pub initial_reconnect_delay: Duration,
+    /// 最大重连延迟（默认：30 秒）
     pub max_reconnect_delay: Duration,
+    /// WebSocket 心跳 ping 间隔（默认：30 秒）
     pub ping_interval: Duration,
+    /// RPC 请求超时时间（默认：10 秒）
     pub request_timeout: Duration,
+    /// 是否自动确认已接收消息（默认：`true`）
     pub ack_messages: bool,
+    /// 是否仅接收瞬时消息，不接收持久化消息（默认：`false`）
     pub transient_only: bool,
+    /// 是否连接到实时流 WebSocket 端点（默认：`false`）
     pub realtime_stream: bool,
+    /// 事件广播通道的缓冲容量（默认：256）
     pub event_channel_capacity: usize,
 }
 
 impl Config {
+    /// 使用节点 ID 和用户 ID 凭据创建配置。
+    ///
+    /// # 参数
+    /// - `base_url` - 服务器基础 URL
+    /// - `credentials` - 用户凭据
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let config = Config::new("http://localhost:8080", Credentials {
+    ///     node_id: 1,
+    ///     user_id: 42,
+    ///     password: plain_password("secret")?,
+    /// });
+    /// ```
     pub fn new(base_url: impl Into<String>, credentials: Credentials) -> Self {
+        let defaults = ClientConfigDefaults::default();
+        Self {
+            base_url: base_url.into(),
+            credentials,
+            login_name: None,
+            cursor_store: default_cursor_store(),
+            reconnect: defaults.reconnect,
+            initial_reconnect_delay: defaults.initial_reconnect_delay,
+            max_reconnect_delay: defaults.max_reconnect_delay,
+            ping_interval: defaults.ping_interval,
+            request_timeout: defaults.request_timeout,
+            ack_messages: defaults.ack_messages,
+            transient_only: defaults.transient_only,
+            realtime_stream: defaults.realtime_stream,
+            event_channel_capacity: defaults.event_channel_capacity,
+        }
+    }
+
+    /// 使用登录名和密码创建配置。
+    ///
+    /// 此方法适用于使用登录名进行认证的场景。
+    /// `Credentials` 中的 `node_id` 和 `user_id` 会被设置为 0（服务器将根据登录名解析）。
+    ///
+    /// # 参数
+    /// - `base_url` - 服务器基础 URL
+    /// - `login_name` - 用户的登录名
+    /// - `password` - 密码输入
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let config = Config::new_with_login_name(
+    ///     "http://localhost:8080",
+    ///     "alice",
+    ///     plain_password("secret")?,
+    /// );
+    /// ```
+    pub fn new_with_login_name(
+        base_url: impl Into<String>,
+        login_name: impl Into<String>,
+        password: PasswordInput,
+    ) -> Self {
         let defaults = ClientConfigDefaults::default();
         Self {
             base_url: base_url.into(),
@@ -134,6 +281,46 @@ impl Config {
     }
 }
 
+/// turntf WebSocket 客户端。
+///
+/// `Client` 是 SDK 的核心类型，负责管理与服务器的 WebSocket 连接，
+/// 提供消息收发、用户管理、频道订阅、数据包发送等实时通信能力。
+///
+/// # 连接生命周期
+///
+/// 1. 创建 `Client` 实例（`Client::new(config)`）
+/// 2. 建立连接（`client.connect().await`）
+/// 3. 订阅事件流（`client.subscribe().await`）
+/// 4. 执行业务操作（发送消息、管理用户等）
+/// 5. 关闭连接（`client.close().await`）
+///
+/// # 特性
+///
+/// - **自动重连** - 支持指数退避重连策略
+/// - **消息去重** - 通过游标存储机制确保消息不会重复投递
+/// - **事件驱动** - 通过 broadcast 通道发布事件，支持多个消费者
+/// - **线程安全** - 所有方法都是线程安全的
+///
+/// # 示例
+///
+/// ```ignore
+/// use turntf::{Client, Config};
+/// use turntf::password::plain_password;
+///
+/// let config = Config::new("http://localhost:8080", Credentials {
+///     node_id: 1,
+///     user_id: 42,
+///     password: plain_password("secret")?,
+/// });
+/// let client = Client::new(config)?;
+/// client.connect().await?;
+///
+/// // 发送消息
+/// let msg = client.send_message(
+///     UserRef { node_id: 1, user_id: 100 },
+///     b"Hello, world!".to_vec(),
+/// ).await?;
+/// ```
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<Inner>,
@@ -185,6 +372,28 @@ enum RpcValue {
 }
 
 impl Client {
+    /// 创建一个新的 `Client` 实例。
+    ///
+    /// 在创建过程中会执行参数验证：
+    /// - `base_url` 不能为空
+    /// - 如果设置了 `login_name`，需要验证其有效性
+    /// - 如果未设置 `login_name`，需要验证 `credentials.node_id` 和 `credentials.user_id`
+    /// - 密码不能为空
+    ///
+    /// 同时会初始化 HTTP 客户端和事件广播通道。
+    ///
+    /// # 参数
+    /// - `config` - 客户端配置
+    ///
+    /// # Errors
+    /// 如果配置参数无效（如 URL 为空、密码为空、ID 无效等），返回 `Error::Validation`。
+    /// 如果 HTTP 客户端初始化失败，返回 `Error::Connection`。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let client = Client::new(config)?;
+    /// ```
     pub fn new(mut config: Config) -> Result<Self> {
         if config.base_url.trim().is_empty() {
             return Err(Error::validation("base_url is required"));
@@ -220,10 +429,33 @@ impl Client {
         })
     }
 
+    /// 获取关联的 HTTP 客户端。
+    ///
+    /// 通过 HTTP 客户端可以执行 REST API 操作，如用户管理、元数据管理等。
+    /// 与 WebSocket `Client` 共享相同的 `base_url` 配置。
     pub fn http(&self) -> HttpClient {
         self.inner.http.clone()
     }
 
+    /// 订阅客户端事件流。
+    ///
+    /// 返回一个 `ClientSubscription` 实现了 `Stream` trait，可以使用异步迭代器方式接收事件。
+    /// 事件类型包括登录、消息、数据包、错误和断开连接。
+    ///
+    /// # 返回值
+    /// 返回 `ClientSubscription`，实现了 `Stream<Item = Result<ClientEvent, BroadcastStreamRecvError>>`。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let mut events = client.subscribe().await;
+    /// while let Some(Ok(event)) = events.next().await {
+    ///     match event {
+    ///         ClientEvent::Message(msg) => println!("收到消息"),
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
     pub async fn subscribe(&self) -> ClientSubscription {
         let sender = self.inner.events.read().await.clone();
         let inner = match sender {
@@ -237,6 +469,20 @@ impl Client {
         ClientSubscription { inner }
     }
 
+    /// 使用节点 ID 和用户 ID 进行登录（HTTP）。
+    ///
+    /// 自动对明文密码进行 bcrypt 哈希处理后调用 HTTP 登录 API。
+    ///
+    /// # 参数
+    /// - `node_id` - 节点 ID
+    /// - `user_id` - 用户 ID
+    /// - `password` - 明文密码
+    ///
+    /// # 返回值
+    /// 成功时返回认证令牌字符串。
+    ///
+    /// # Errors
+    /// 如果参数无效或服务端认证失败，返回相应的错误。
     pub async fn login(
         &self,
         node_id: i64,
@@ -246,6 +492,18 @@ impl Client {
         self.inner.http.login(node_id, user_id, password).await
     }
 
+    /// 使用节点 ID、用户 ID 和已处理的密码输入进行登录（HTTP）。
+    ///
+    /// # 参数
+    /// - `node_id` - 节点 ID
+    /// - `user_id` - 用户 ID
+    /// - `password` - 密码输入
+    ///
+    /// # 返回值
+    /// 成功时返回认证令牌字符串。
+    ///
+    /// # Errors
+    /// 如果参数无效或服务端认证失败，返回相应的错误。
     pub async fn login_with_password(
         &self,
         node_id: i64,
@@ -258,6 +516,17 @@ impl Client {
             .await
     }
 
+    /// 使用登录名和密码进行登录（HTTP）。
+    ///
+    /// # 参数
+    /// - `login_name` - 登录名
+    /// - `password` - 明文密码
+    ///
+    /// # 返回值
+    /// 成功时返回认证令牌字符串。
+    ///
+    /// # Errors
+    /// 如果登录名为空或服务端认证失败，返回相应的错误。
     pub async fn login_by_login_name(
         &self,
         login_name: impl AsRef<str>,
@@ -269,6 +538,17 @@ impl Client {
             .await
     }
 
+    /// 使用登录名和已处理的密码输入进行登录（HTTP）。
+    ///
+    /// # 参数
+    /// - `login_name` - 登录名
+    /// - `password` - 密码输入
+    ///
+    /// # 返回值
+    /// 成功时返回认证令牌字符串。
+    ///
+    /// # Errors
+    /// 如果登录名为空或服务端认证失败，返回相应的错误。
     pub async fn login_by_login_name_with_password(
         &self,
         login_name: impl AsRef<str>,
@@ -280,6 +560,28 @@ impl Client {
             .await
     }
 
+    /// 建立 WebSocket 连接。
+    ///
+    /// 如果需要自动重连，调用此方法后会启动后台连接管理任务。
+    /// 连接完成后，客户端会发送登录请求进行认证，之后可以接收消息和事件。
+    ///
+    /// 如果连接已建立，此方法会立即返回 `Ok(())`。
+    ///
+    /// # Errors
+    ///
+    /// - 如果客户端已关闭，返回 `Error::Closed`
+    /// - 如果连接过程中发生错误（如网络错误、认证失败），返回相应的错误
+    ///
+    /// # Panics
+    ///
+    /// 此方法不会主动引发 panic，但内部使用的 tokio 任务可能在极端情况下 panic。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// client.connect().await?;
+    /// println!("已连接到服务器");
+    /// ```
     pub async fn connect(&self) -> Result<()> {
         {
             let state = self.inner.state.lock().await;
@@ -311,6 +613,21 @@ impl Client {
         }
     }
 
+    /// 关闭 WebSocket 连接并清理资源。
+    ///
+    /// 关闭后：
+    /// - 所有未完成的 RPC 请求会收到 `ClosedError`
+    /// - 后台运行任务会被中止
+    /// - 事件广播通道会被关闭
+    /// - 客户端实例不能再被使用，需要创建新的 `Client` 实例
+    ///
+    /// 如果客户端已经关闭，此方法不会重复执行关闭操作。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// client.close().await?;
+    /// ```
     pub async fn close(&self) -> Result<()> {
         let already_closed = {
             let mut state = self.inner.state.lock().await;
@@ -344,6 +661,14 @@ impl Client {
         Ok(())
     }
 
+    /// 发送 WebSocket PING 心跳请求。
+    ///
+    /// 等待服务器返回 PONG 响应。如果未收到响应或响应格式不正确，返回错误。
+    ///
+    /// 注意：客户端会自动发送心跳（基于 `Config.ping_interval` 配置），通常无需手动调用此方法。
+    ///
+    /// # Errors
+    /// 如果客户端未连接或服务器未正确响应，返回相应的错误。
     pub async fn ping(&self) -> Result<()> {
         match self
             .rpc(|request_id| proto::ClientEnvelope {
@@ -358,6 +683,28 @@ impl Client {
         }
     }
 
+    /// 发送持久化消息。
+    ///
+    /// 消息会被服务器持久化存储，并通过 WebSocket 可靠地投递给目标用户。
+    /// 返回包含游标信息的 `Message` 对象。
+    ///
+    /// # 参数
+    /// - `target` - 目标用户引用
+    /// - `body` - 消息体内容（字节数组）
+    ///
+    /// # Errors
+    /// 如果 `target` 无效或 `body` 为空，返回 `Error::Validation`。
+    /// 如果客户端未连接或服务器处理失败，返回相应的错误。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let msg = client.send_message(
+    ///     UserRef { node_id: 1, user_id: 100 },
+    ///     b"Hello!".to_vec(),
+    /// ).await?;
+    /// println!("消息已发送，seq={}", msg.seq);
+    /// ```
     pub async fn send_message(&self, target: UserRef, body: Vec<u8>) -> Result<Message> {
         validate_user_ref(&target, "target")?;
         if body.is_empty() {
@@ -384,10 +731,25 @@ impl Client {
         }
     }
 
+    /// 发送持久化消息（`send_message` 的别名）。
+    ///
+    /// 与 `send_message` 行为完全一致。
     pub async fn post_message(&self, target: UserRef, body: Vec<u8>) -> Result<Message> {
         self.send_message(target, body).await
     }
 
+    /// 发送瞬时数据包。
+    ///
+    /// 数据包不会被持久化存储，适用于实时通信场景（如"正在输入"提示、实时位置更新等）。
+    ///
+    /// # 参数
+    /// - `target` - 目标用户引用
+    /// - `body` - 数据包体内容（字节数组）
+    /// - `delivery_mode` - 投递模式（`BestEffort` 或 `RouteRetry`）
+    ///
+    /// # Errors
+    /// 如果参数无效（如 `delivery_mode` 为 `Unspecified`），返回 `Error::Validation`。
+    /// 如果客户端未连接或服务器处理失败，返回相应的错误。
     pub async fn send_packet(
         &self,
         target: UserRef,
@@ -398,6 +760,18 @@ impl Client {
             .await
     }
 
+    /// 向指定会话发送瞬时数据包。
+    ///
+    /// 与 `send_packet` 类似，但可以指定目标会话，使数据包只投递到特定会话（如特定设备）。
+    ///
+    /// # 参数
+    /// - `target` - 目标用户引用
+    /// - `body` - 数据包体内容（字节数组）
+    /// - `delivery_mode` - 投递模式
+    /// - `target_session` - 目标会话引用
+    ///
+    /// # Errors
+    /// 如果参数无效，返回 `Error::Validation`。
     pub async fn send_packet_to_session(
         &self,
         target: UserRef,
@@ -447,6 +821,7 @@ impl Client {
         }
     }
 
+    /// 发送瞬时数据包（`send_packet` 的别名）。
     pub async fn post_packet(
         &self,
         target: UserRef,
@@ -456,6 +831,7 @@ impl Client {
         self.send_packet(target, body, delivery_mode).await
     }
 
+    /// 向指定会话发送瞬时数据包（`send_packet_to_session` 的别名）。
     pub async fn post_packet_to_session(
         &self,
         target: UserRef,
@@ -467,6 +843,26 @@ impl Client {
             .await
     }
 
+    /// 创建新用户。
+    ///
+    /// 通过 WebSocket RPC 创建新用户。支持设置用户名、登录名、密码、角色和个人资料。
+    ///
+    /// # 参数
+    /// - `request` - 创建用户的请求参数
+    ///
+    /// # Errors
+    /// - 如果 `username` 或 `role` 为空，返回 `Error::Validation`
+    /// - 如果角色为 `"channel"` 但提供了 `login_name`，返回 `Error::Validation`
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let user = client.create_user(CreateUserRequest {
+    ///     username: "new_user".to_string(),
+    ///     role: "user".to_string(),
+    ///     ..Default::default()
+    /// }).await?;
+    /// ```
     pub async fn create_user(&self, request: CreateUserRequest) -> Result<User> {
         let CreateUserRequest {
             username,
@@ -514,6 +910,12 @@ impl Client {
         }
     }
 
+    /// 创建频道（角色为 `"channel"` 的用户）。
+    ///
+    /// 如果 `request.role` 为空，会自动设置为 `"channel"`。
+    ///
+    /// # 参数
+    /// - `request` - 创建用户的请求参数
     pub async fn create_channel(&self, mut request: CreateUserRequest) -> Result<User> {
         if request.role.is_empty() {
             request.role = "channel".to_owned();
@@ -521,6 +923,13 @@ impl Client {
         self.create_user(request).await
     }
 
+    /// 获取用户信息。
+    ///
+    /// # 参数
+    /// - `target` - 目标用户引用
+    ///
+    /// # Errors
+    /// 如果 `target` 无效或用户不存在，返回相应的错误。
     pub async fn get_user(&self, target: UserRef) -> Result<User> {
         validate_user_ref(&target, "target")?;
         match self
@@ -539,6 +948,16 @@ impl Client {
         }
     }
 
+    /// 更新用户信息。
+    ///
+    /// 所有字段均为可选，只更新提供的字段。
+    ///
+    /// # 参数
+    /// - `target` - 目标用户引用
+    /// - `request` - 更新请求参数
+    ///
+    /// # Errors
+    /// 如果角色为 `"channel"` 但提供了 `login_name`，返回 `Error::Validation`。
     pub async fn update_user(&self, target: UserRef, request: UpdateUserRequest) -> Result<User> {
         validate_user_ref(&target, "target")?;
         let UpdateUserRequest {
@@ -583,6 +1002,10 @@ impl Client {
         }
     }
 
+    /// 删除用户。
+    ///
+    /// # 参数
+    /// - `target` - 要删除的目标用户引用
     pub async fn delete_user(&self, target: UserRef) -> Result<DeleteUserResult> {
         validate_user_ref(&target, "target")?;
         match self
@@ -601,6 +1024,14 @@ impl Client {
         }
     }
 
+    /// 获取用户元数据。
+    ///
+    /// # 参数
+    /// - `owner` - 元数据所属的用户
+    /// - `key` - 元数据键名
+    ///
+    /// # Errors
+    /// 如果 `owner` 无效或 `key` 格式不正确，返回 `Error::Validation`。
     pub async fn get_user_metadata(
         &self,
         owner: UserRef,
@@ -628,6 +1059,17 @@ impl Client {
         }
     }
 
+    /// 创建或更新用户元数据。
+    ///
+    /// 如果指定键的元数据已存在则更新，否则创建新的元数据条目。
+    ///
+    /// # 参数
+    /// - `owner` - 元数据所属的用户
+    /// - `key` - 元数据键名
+    /// - `request` - 包含值和可选过期时间的请求参数
+    ///
+    /// # Errors
+    /// 如果参数无效，返回 `Error::Validation`。
     pub async fn upsert_user_metadata(
         &self,
         owner: UserRef,
@@ -658,6 +1100,11 @@ impl Client {
         }
     }
 
+    /// 删除用户元数据。
+    ///
+    /// # 参数
+    /// - `owner` - 元数据所属的用户
+    /// - `key` - 要删除的元数据键名
     pub async fn delete_user_metadata(
         &self,
         owner: UserRef,
@@ -685,6 +1132,16 @@ impl Client {
         }
     }
 
+    /// 扫描用户元数据。
+    ///
+    /// 支持按前缀过滤和分页查询。
+    ///
+    /// # 参数
+    /// - `owner` - 元数据所属的用户
+    /// - `request` - 扫描参数（前缀、分页游标、限制数）
+    ///
+    /// # Errors
+    /// 如果参数无效（如 `limit` 超出范围），返回 `Error::Validation`。
     pub async fn scan_user_metadata(
         &self,
         owner: UserRef,
@@ -715,6 +1172,16 @@ impl Client {
         }
     }
 
+    /// 订阅频道。
+    ///
+    /// 订阅后可以接收到该频道发送的消息。
+    ///
+    /// # 参数
+    /// - `subscriber` - 订阅者用户引用
+    /// - `channel` - 要订阅的频道用户引用
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn subscribe_channel(
         &self,
         subscriber: UserRef,
@@ -731,6 +1198,7 @@ impl Client {
         Ok(subscription_from_attachment(&attachment))
     }
 
+    /// 创建频道订阅（`subscribe_channel` 的别名）。
     pub async fn create_subscription(
         &self,
         subscriber: UserRef,
@@ -739,6 +1207,14 @@ impl Client {
         self.subscribe_channel(subscriber, channel).await
     }
 
+    /// 取消订阅频道。
+    ///
+    /// # 参数
+    /// - `subscriber` - 订阅者用户引用
+    /// - `channel` - 要取消订阅的频道
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn unsubscribe_channel(
         &self,
         subscriber: UserRef,
@@ -750,6 +1226,13 @@ impl Client {
         Ok(subscription_from_attachment(&attachment))
     }
 
+    /// 获取用户的所有频道订阅列表。
+    ///
+    /// # 参数
+    /// - `subscriber` - 订阅者用户引用
+    ///
+    /// # Errors
+    /// 如果用户引用无效，返回 `Error::Validation`。
     pub async fn list_subscriptions(&self, subscriber: UserRef) -> Result<Vec<Subscription>> {
         self.list_attachments(subscriber, Some(AttachmentType::ChannelSubscription))
             .await?
@@ -758,6 +1241,13 @@ impl Client {
             .collect()
     }
 
+    /// 屏蔽用户（将用户加入黑名单）。
+    ///
+    /// 被屏蔽的用户将无法向屏蔽者发送消息。
+    ///
+    /// # 参数
+    /// - `owner` - 黑名单所有者
+    /// - `blocked` - 要被屏蔽的用户
     pub async fn block_user(&self, owner: UserRef, blocked: UserRef) -> Result<BlacklistEntry> {
         let attachment = self
             .upsert_attachment(
@@ -770,6 +1260,11 @@ impl Client {
         Ok(blacklist_entry_from_attachment(&attachment))
     }
 
+    /// 解除用户屏蔽。
+    ///
+    /// # 参数
+    /// - `owner` - 黑名单所有者
+    /// - `blocked` - 要解除屏蔽的用户
     pub async fn unblock_user(&self, owner: UserRef, blocked: UserRef) -> Result<BlacklistEntry> {
         let attachment = self
             .delete_attachment(owner, blocked, AttachmentType::UserBlacklist)
@@ -777,6 +1272,10 @@ impl Client {
         Ok(blacklist_entry_from_attachment(&attachment))
     }
 
+    /// 获取用户的黑名单列表。
+    ///
+    /// # 参数
+    /// - `owner` - 黑名单所有者
     pub async fn list_blocked_users(&self, owner: UserRef) -> Result<Vec<BlacklistEntry>> {
         self.list_attachments(owner, Some(AttachmentType::UserBlacklist))
             .await?
@@ -785,6 +1284,15 @@ impl Client {
             .collect()
     }
 
+    /// 创建或更新用户附件。
+    ///
+    /// 附件用于定义用户之间的关联关系，如频道订阅、黑名单等。
+    ///
+    /// # 参数
+    /// - `owner` - 附件所有者
+    /// - `subject` - 附件主题用户（关联的目标用户）
+    /// - `attachment_type` - 附件类型
+    /// - `config_json` - 附件的 JSON 配置数据
     pub async fn upsert_attachment(
         &self,
         owner: UserRef,
@@ -815,6 +1323,12 @@ impl Client {
         }
     }
 
+    /// 删除用户附件。
+    ///
+    /// # 参数
+    /// - `owner` - 附件所有者
+    /// - `subject` - 附件主题用户
+    /// - `attachment_type` - 附件类型
     pub async fn delete_attachment(
         &self,
         owner: UserRef,
@@ -843,6 +1357,11 @@ impl Client {
         }
     }
 
+    /// 获取用户的附件列表。
+    ///
+    /// # 参数
+    /// - `owner` - 附件所有者
+    /// - `attachment_type` - 可选的附件类型过滤（`None` 表示返回所有类型）
     pub async fn list_attachments(
         &self,
         owner: UserRef,
@@ -870,6 +1389,11 @@ impl Client {
         }
     }
 
+    /// 获取目标用户的消息列表。
+    ///
+    /// # 参数
+    /// - `target` - 目标用户
+    /// - `limit` - 返回消息的最大数量
     pub async fn list_messages(&self, target: UserRef, limit: i32) -> Result<Vec<Message>> {
         validate_user_ref(&target, "target")?;
         match self
@@ -889,6 +1413,11 @@ impl Client {
         }
     }
 
+    /// 获取事件日志列表。
+    ///
+    /// # 参数
+    /// - `after` - 起始事件序列号（0 表示从最新开始）
+    /// - `limit` - 返回事件的最大数量
     pub async fn list_events(&self, after: i64, limit: i32) -> Result<Vec<Event>> {
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
@@ -907,6 +1436,7 @@ impl Client {
         }
     }
 
+    /// 获取集群节点列表。
     pub async fn list_cluster_nodes(&self) -> Result<Vec<ClusterNode>> {
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
@@ -923,6 +1453,10 @@ impl Client {
         }
     }
 
+    /// 获取指定节点的已登录用户列表。
+    ///
+    /// # 参数
+    /// - `node_id` - 要查询的节点 ID
     pub async fn list_node_logged_in_users(&self, node_id: i64) -> Result<Vec<LoggedInUser>> {
         validate_positive_i64(node_id, "node_id")?;
         match self
@@ -943,6 +1477,12 @@ impl Client {
         }
     }
 
+    /// 解析用户的活跃会话。
+    ///
+    /// 返回用户的在线节点状态和所有活跃会话信息。
+    ///
+    /// # 参数
+    /// - `user` - 目标用户引用
     pub async fn resolve_user_sessions(&self, user: UserRef) -> Result<ResolvedUserSessions> {
         validate_user_ref(&user, "user")?;
         match self
@@ -963,6 +1503,9 @@ impl Client {
         }
     }
 
+    /// 获取集群节点的运行状态。
+    ///
+    /// 返回节点的健康状态、消息窗口大小、投影状态、对等节点状态等信息。
     pub async fn operations_status(&self) -> Result<OperationsStatus> {
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
@@ -979,6 +1522,9 @@ impl Client {
         }
     }
 
+    /// 获取节点的监控指标文本。
+    ///
+    /// 返回 Prometheus 格式的监控指标。
     pub async fn metrics(&self) -> Result<String> {
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
