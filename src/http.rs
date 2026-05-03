@@ -11,6 +11,7 @@ use crate::mapping::{
     json_bytes_to_value, logged_in_user_from_http, message_from_http, operations_status_from_http,
     relay_accepted_from_http, subscription_from_attachment, user_from_http,
     user_metadata_from_http, user_metadata_scan_result_from_http,
+    user_metadata_typed_value_to_http,
 };
 use crate::password::{plain_password, PasswordInput};
 use crate::types::{
@@ -22,8 +23,8 @@ use crate::types::{
 use crate::validation::{
     normalize_login_name, normalize_optional_filter, validate_delivery_mode, validate_login_name,
     validate_optional_user_metadata_key_fragment, validate_optional_user_ref,
-    validate_positive_i64, validate_user_metadata_key, validate_user_metadata_scan_limit,
-    validate_user_ref,
+    validate_positive_i64, validate_upsert_user_metadata_request, validate_user_metadata_key,
+    validate_user_metadata_scan_limit, validate_user_ref,
 };
 
 /// HTTP 客户端，用于通过 REST API 与 turntf 服务器通信。
@@ -392,6 +393,10 @@ impl HttpClient {
 
     /// 获取当前用户可通讯的活跃用户列表。
     ///
+    /// 服务端会先按当前权限裁剪可见用户集合，再应用 `name` / `uid` 过滤。
+    /// 普通用户可能看不到写入了 `system.visible_to_others=false` 的用户或频道，
+    /// 但这不影响业务侧在已知 `uid` 时继续调用发消息接口。
+    ///
     /// # 参数
     /// - `token` - 认证令牌
     /// - `request` - 过滤条件；`name` 为空时不按名称过滤，`uid={0,0}` 时不按 uid 过滤
@@ -429,6 +434,9 @@ impl HttpClient {
 
     /// 获取用户元数据。
     ///
+    /// `owner` 可以是普通用户、管理员、超级管理员或 `channel`；系统保留用户不能作为 owner。
+    /// HTTP 响应会始终返回原始 `value`，并在服务端可稳定解释时额外填充 `typed_value`。
+    ///
     /// # 参数
     /// - `token` - 认证令牌
     /// - `owner` - 元数据所属的用户
@@ -463,6 +471,7 @@ impl HttpClient {
     /// 创建或更新用户元数据。
     ///
     /// 如果指定键的元数据已存在，则更新其值；否则创建新的元数据条目。
+    /// HTTP 请求可以写入原始 `value`，也可以写入类型化的 `typed_value` 视图。
     ///
     /// # 参数
     /// - `token` - 认证令牌
@@ -482,9 +491,23 @@ impl HttpClient {
         validate_user_ref(&owner, "owner")?;
         let key = key.into();
         validate_user_metadata_key(&key, "key")?;
-        let mut body =
-            Map::from_iter([("value".into(), Value::from(STANDARD.encode(request.value)))]);
-        if let Some(expires_at) = request.expires_at {
+        validate_upsert_user_metadata_request(&key, &request)?;
+        let UpsertUserMetadataRequest {
+            value,
+            typed_value,
+            expires_at,
+        } = request;
+
+        let mut body = Map::new();
+        if let Some(typed_value) = typed_value {
+            body.insert(
+                "typed_value".into(),
+                user_metadata_typed_value_to_http(&typed_value),
+            );
+        } else {
+            body.insert("value".into(), Value::from(STANDARD.encode(value)));
+        }
+        if let Some(expires_at) = expires_at {
             body.insert("expires_at".into(), Value::from(expires_at));
         }
 
@@ -539,6 +562,7 @@ impl HttpClient {
     /// 扫描用户元数据。
     ///
     /// 支持按前缀过滤和分页查询。
+    /// HTTP 扫描结果中的每个条目都会保留原始 `value`，并在可稳定解释时附带 `typed_value`。
     ///
     /// # 参数
     /// - `token` - 认证令牌

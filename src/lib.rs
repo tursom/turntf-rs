@@ -84,5 +84,6 @@ pub use types::{
     RelayConfigBuilder, RelayEnvelope, RelayError, RelayKind, RelayState, Reliability,
     ResolvedSession, ResolvedUserSessions, ScanUserMetadataRequest, SessionRef, Subscription,
     UpdateUserRequest, UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult,
-    UserRef,
+    UserMetadataTypedValue, UserRef, USER_METADATA_SYSTEM_PREFIX,
+    USER_METADATA_VISIBLE_TO_OTHERS_KEY,
 };

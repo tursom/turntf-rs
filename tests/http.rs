@@ -10,7 +10,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use turntf::{
     plain_password, CreateUserRequest, DeliveryMode, HttpClient, ListUsersRequest,
-    ScanUserMetadataRequest, UpdateUserRequest, UpsertUserMetadataRequest, UserRef,
+    ScanUserMetadataRequest, UpdateUserRequest, UpsertUserMetadataRequest, UserMetadataTypedValue,
+    UserRef, USER_METADATA_VISIBLE_TO_OTHERS_KEY,
 };
 
 #[derive(Debug)]
@@ -159,6 +160,49 @@ fn status_text(status: u16) -> &'static str {
         404 => "Not Found",
         _ => "Unknown",
     }
+}
+
+#[test]
+fn typed_user_metadata_value_serde_round_trip() {
+    let cases = [
+        (
+            UserMetadataTypedValue::Bytes(vec![0x00, 0x01]),
+            json!({ "kind": "bytes", "bytes_value": "AAE=" }),
+        ),
+        (
+            UserMetadataTypedValue::Bool(false),
+            json!({ "kind": "bool", "bool_value": false }),
+        ),
+        (
+            UserMetadataTypedValue::String("Alice".into()),
+            json!({ "kind": "string", "string_value": "Alice" }),
+        ),
+        (
+            UserMetadataTypedValue::Number(serde_json::Number::from_f64(7.5).unwrap()),
+            json!({ "kind": "number", "number_value": 7.5 }),
+        ),
+        (
+            UserMetadataTypedValue::Json(json!({ "theme": "blue" })),
+            json!({ "kind": "json", "json_value": { "theme": "blue" } }),
+        ),
+    ];
+
+    for (typed_value, wire) in cases {
+        assert_eq!(serde_json::to_value(&typed_value).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<UserMetadataTypedValue>(wire).unwrap(),
+            typed_value
+        );
+    }
+
+    assert_eq!(
+        serde_json::from_value::<UserMetadataTypedValue>(json!({
+            "kind": "json",
+            "json_value": null
+        }))
+        .unwrap(),
+        UserMetadataTypedValue::Json(Value::Null)
+    );
 }
 
 #[tokio::test]
@@ -666,6 +710,7 @@ async fn http_client_requests_and_encoding() {
             "session:web:1",
             UpsertUserMetadataRequest {
                 value: vec![0xde, 0xad, 0xbe],
+                typed_value: None,
                 expires_at: Some("2026-05-01T12:00:00Z".into()),
             },
         )
@@ -673,6 +718,7 @@ async fn http_client_requests_and_encoding() {
         .unwrap();
     assert_eq!(metadata.value, vec![0xde, 0xad, 0xbe]);
     assert_eq!(metadata.expires_at, "2026-05-01T12:00:00Z");
+    assert!(metadata.typed_value.is_none());
 
     let loaded_metadata = client
         .get_user_metadata(
@@ -686,6 +732,7 @@ async fn http_client_requests_and_encoding() {
         .await
         .unwrap();
     assert_eq!(loaded_metadata.updated_at, "hlc-meta-get");
+    assert!(loaded_metadata.typed_value.is_none());
 
     let scanned_metadata = client
         .scan_user_metadata(
@@ -705,6 +752,7 @@ async fn http_client_requests_and_encoding() {
     assert_eq!(scanned_metadata.count, 1);
     assert_eq!(scanned_metadata.next_after, "session:web:1");
     assert_eq!(scanned_metadata.items[0].key, "session:web:1");
+    assert!(scanned_metadata.items[0].typed_value.is_none());
 
     let deleted_metadata = client
         .delete_user_metadata(
@@ -718,6 +766,7 @@ async fn http_client_requests_and_encoding() {
         .await
         .unwrap();
     assert_eq!(deleted_metadata.deleted_at, "hlc-meta-deleted");
+    assert!(deleted_metadata.typed_value.is_none());
 
     let subscription = client
         .create_subscription(
@@ -901,6 +950,232 @@ async fn http_client_requests_and_encoding() {
 }
 
 #[tokio::test]
+async fn http_client_supports_typed_metadata_visibility_channel_owner_and_visible_users() {
+    let (base_url, server) = spawn_http_server(|request| {
+        let body = if request.body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice::<Value>(&request.body).unwrap()
+        };
+
+        match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/auth/login") => HttpTestResponse::json(json!({ "token": "alice-token" }), 200),
+            ("PUT", "/nodes/4096/users/1025/metadata/system.visible_to_others") => {
+                let typed_value = body.get("typed_value").and_then(Value::as_object).unwrap();
+                assert!(body.get("value").is_none());
+                assert_eq!(typed_value.get("kind").and_then(Value::as_str), Some("bool"));
+                assert_eq!(typed_value.get("bool_value").and_then(Value::as_bool), Some(false));
+                assert!(body.get("expires_at").is_none());
+                HttpTestResponse::json(
+                    json!({
+                        "owner": { "node_id": 4096, "user_id": 1025 },
+                        "key": USER_METADATA_VISIBLE_TO_OTHERS_KEY,
+                        "value": STANDARD.encode("false"),
+                        "typed_value": {
+                            "kind": "bool",
+                            "bool_value": false
+                        },
+                        "updated_at": "hlc-visibility-upsert",
+                        "origin_node_id": 4096
+                    }),
+                    201,
+                )
+            }
+            ("GET", "/nodes/4096/users/1025/metadata/system.visible_to_others") => {
+                HttpTestResponse::json(
+                    json!({
+                        "owner": { "node_id": 4096, "user_id": 1025 },
+                        "key": USER_METADATA_VISIBLE_TO_OTHERS_KEY,
+                        "value": STANDARD.encode("false"),
+                        "typed_value": {
+                            "kind": "bool",
+                            "bool_value": false
+                        },
+                        "updated_at": "hlc-visibility-get",
+                        "origin_node_id": 4096
+                    }),
+                    200,
+                )
+            }
+            ("PUT", "/nodes/4096/users/2025/metadata/channel.config") => {
+                let typed_value = body.get("typed_value").and_then(Value::as_object).unwrap();
+                assert!(body.get("value").is_none());
+                assert_eq!(typed_value.get("kind").and_then(Value::as_str), Some("json"));
+                assert_eq!(typed_value.get("json_value"), Some(&json!({ "theme": "blue" })));
+                HttpTestResponse::json(
+                    json!({
+                        "owner": { "node_id": 4096, "user_id": 2025 },
+                        "key": "channel.config",
+                        "value": STANDARD.encode(br#"{"theme":"blue"}"#),
+                        "typed_value": {
+                            "kind": "json",
+                            "json_value": { "theme": "blue" }
+                        },
+                        "updated_at": "hlc-channel-upsert",
+                        "origin_node_id": 4096
+                    }),
+                    201,
+                )
+            }
+            ("GET", "/nodes/4096/users/2025/metadata?prefix=channel.&limit=1") => {
+                HttpTestResponse::json(
+                    json!({
+                        "items": [{
+                            "owner": { "node_id": 4096, "user_id": 2025 },
+                            "key": "channel.config",
+                            "value": STANDARD.encode(br#"{"theme":"blue"}"#),
+                            "typed_value": {
+                                "kind": "json",
+                                "json_value": { "theme": "blue" }
+                            },
+                            "updated_at": "hlc-channel-scan",
+                            "origin_node_id": 4096
+                        }],
+                        "count": 1,
+                        "next_after": "channel.config"
+                    }),
+                    200,
+                )
+            }
+            ("GET", "/users") => HttpTestResponse::json(
+                json!([
+                    {
+                        "node_id": 4096,
+                        "user_id": 2025,
+                        "username": "announcements",
+                        "login_name": "",
+                        "role": "channel",
+                        "profile": { "display_name": "Announcements" }
+                    }
+                ]),
+                200,
+            ),
+            ("POST", "/nodes/4096/users/1027/messages") => {
+                assert_eq!(
+                    body.get("body").and_then(Value::as_str),
+                    Some(STANDARD.encode(b"hidden hello").as_str())
+                );
+                HttpTestResponse::json(
+                    json!({
+                        "recipient": { "node_id": 4096, "user_id": 1027 },
+                        "node_id": 4096,
+                        "seq": 9,
+                        "sender": { "node_id": 4096, "user_id": 1025 },
+                        "body": STANDARD.encode(b"hidden hello"),
+                        "created_at": "hlc-hidden-message"
+                    }),
+                    201,
+                )
+            }
+            other => panic!("unexpected route: {other:?}"),
+        }
+    })
+    .await;
+
+    let client = HttpClient::new(base_url).unwrap();
+    let token = client.login(4096, 1025, "alice-password").await.unwrap();
+
+    let visibility = client
+        .upsert_user_metadata(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            USER_METADATA_VISIBLE_TO_OTHERS_KEY,
+            UpsertUserMetadataRequest::typed(UserMetadataTypedValue::Bool(false)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(visibility.value, b"false".to_vec());
+    assert_eq!(
+        visibility.typed_value,
+        Some(UserMetadataTypedValue::Bool(false))
+    );
+
+    let loaded_visibility = client
+        .get_user_metadata(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            USER_METADATA_VISIBLE_TO_OTHERS_KEY,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded_visibility.typed_value,
+        Some(UserMetadataTypedValue::Bool(false))
+    );
+
+    let channel_metadata = client
+        .upsert_user_metadata(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 2025,
+            },
+            "channel.config",
+            UpsertUserMetadataRequest::typed(UserMetadataTypedValue::Json(json!({
+                "theme": "blue"
+            }))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(channel_metadata.owner.user_id, 2025);
+    assert_eq!(
+        channel_metadata.typed_value,
+        Some(UserMetadataTypedValue::Json(json!({ "theme": "blue" })))
+    );
+
+    let scanned = client
+        .scan_user_metadata(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 2025,
+            },
+            ScanUserMetadataRequest {
+                prefix: "channel.".into(),
+                after: String::new(),
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanned.items.len(), 1);
+    assert_eq!(scanned.items[0].owner.user_id, 2025);
+    assert_eq!(
+        scanned.items[0].typed_value,
+        Some(UserMetadataTypedValue::Json(json!({ "theme": "blue" })))
+    );
+
+    let users = client
+        .list_users(&token, ListUsersRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].role, "channel");
+    assert_eq!(users[0].user_id, 2025);
+
+    let message = client
+        .post_message(
+            &token,
+            UserRef {
+                node_id: 4096,
+                user_id: 1027,
+            },
+            b"hidden hello".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(message.recipient.user_id, 1027);
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn http_client_maps_server_errors_and_validates_node_id() {
     let (base_url, server) =
         spawn_http_server(
@@ -932,6 +1207,39 @@ async fn http_client_maps_server_errors_and_validates_node_id() {
                 user_id: 1025,
             },
             "bad/key",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
+
+    let error = client
+        .upsert_user_metadata(
+            "token",
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            USER_METADATA_VISIBLE_TO_OTHERS_KEY,
+            UpsertUserMetadataRequest {
+                value: Vec::new(),
+                typed_value: Some(UserMetadataTypedValue::String("hidden".into())),
+                expires_at: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
+
+    let error = client
+        .upsert_user_metadata(
+            "token",
+            UserRef {
+                node_id: 4096,
+                user_id: 1025,
+            },
+            USER_METADATA_VISIBLE_TO_OTHERS_KEY,
+            UpsertUserMetadataRequest::typed(UserMetadataTypedValue::Bool(true))
+                .with_expires_at("2026-05-01T12:00:00Z"),
         )
         .await
         .unwrap_err();

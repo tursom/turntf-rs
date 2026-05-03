@@ -1,5 +1,8 @@
 use crate::errors::{Error, Result};
-use crate::types::{DeliveryMode, SessionRef, UserRef};
+use crate::types::{
+    DeliveryMode, SessionRef, UpsertUserMetadataRequest, UserMetadataTypedValue, UserRef,
+    USER_METADATA_VISIBLE_TO_OTHERS_KEY,
+};
 
 /// 用户元数据键的最大长度（128 字符）。
 const USER_METADATA_KEY_MAX_LENGTH: usize = 128;
@@ -159,6 +162,55 @@ pub fn validate_user_metadata_scan_limit(limit: i32) -> Result<()> {
     Ok(())
 }
 
+/// 验证 metadata upsert 请求的本地约束。
+///
+/// - `typed_value` 与非空 `value` 互斥
+/// - `system.visible_to_others` 不允许 `expires_at`
+/// - `system.visible_to_others` 的值必须可解释为布尔
+pub(crate) fn validate_upsert_user_metadata_request(
+    key: &str,
+    request: &UpsertUserMetadataRequest,
+) -> Result<()> {
+    if request.typed_value.is_some() && !request.value.is_empty() {
+        return Err(Error::validation(
+            "value and typed_value cannot both be set",
+        ));
+    }
+
+    if key != USER_METADATA_VISIBLE_TO_OTHERS_KEY {
+        return Ok(());
+    }
+
+    if request.expires_at.is_some() {
+        return Err(Error::validation(format!(
+            "metadata key {USER_METADATA_VISIBLE_TO_OTHERS_KEY} does not allow expires_at"
+        )));
+    }
+
+    match request.typed_value.as_ref() {
+        Some(UserMetadataTypedValue::Bool(_)) => Ok(()),
+        Some(_) => Err(Error::validation(format!(
+            "metadata key {USER_METADATA_VISIBLE_TO_OTHERS_KEY} requires typed_value bool"
+        ))),
+        None => validate_user_metadata_bool_bytes(&request.value, "value"),
+    }
+}
+
+/// 把 metadata upsert 请求规范化为最终要发送到 protobuf wire 的原始字节。
+pub(crate) fn resolve_upsert_user_metadata_value(
+    request: &UpsertUserMetadataRequest,
+) -> Result<Vec<u8>> {
+    if let Some(typed_value) = request.typed_value.as_ref() {
+        if !request.value.is_empty() {
+            return Err(Error::validation(
+                "value and typed_value cannot both be set",
+            ));
+        }
+        return Ok(typed_value.to_raw_bytes());
+    }
+    Ok(request.value.clone())
+}
+
 fn validate_user_metadata_key_fragment(value: &str, field: &str, allow_empty: bool) -> Result<()> {
     if value.is_empty() {
         if allow_empty {
@@ -182,4 +234,15 @@ fn validate_user_metadata_key_fragment(value: &str, field: &str, allow_empty: bo
         }
     }
     Ok(())
+}
+
+fn validate_user_metadata_bool_bytes(value: &[u8], field: &str) -> Result<()> {
+    let value = std::str::from_utf8(value)
+        .map_err(|_| Error::validation(format!("{field} must be a UTF-8 boolean")))?;
+    match value.trim() {
+        "true" | "false" => Ok(()),
+        _ => Err(Error::validation(format!(
+            "{field} must be \"true\" or \"false\""
+        ))),
+    }
 }

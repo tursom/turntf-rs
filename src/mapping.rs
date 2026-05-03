@@ -9,7 +9,7 @@ use crate::types::{
     EventLogTrimStatus, LoggedInUser, LoginInfo, Message, MessageCursor, MessageTrimStatus,
     OnlineNodePresence, OperationsStatus, Packet, PeerOriginStatus, PeerStatus, ProjectionStatus,
     RelayAccepted, ResolvedSession, ResolvedUserSessions, SessionRef, Subscription, User,
-    UserMetadata, UserMetadataScanResult, UserRef,
+    UserMetadata, UserMetadataScanResult, UserMetadataTypedValue, UserRef,
 };
 
 pub(crate) fn delivery_mode_to_proto(mode: DeliveryMode) -> i32 {
@@ -123,6 +123,7 @@ pub(crate) fn user_metadata_from_proto(
         owner: user_ref_from_proto(value.owner.as_ref()),
         key: value.key.clone(),
         value: value.value.to_vec(),
+        typed_value: None,
         updated_at: value.updated_at.clone(),
         deleted_at: value.deleted_at.clone(),
         expires_at: value.expires_at.clone(),
@@ -445,11 +446,77 @@ pub(crate) fn user_metadata_from_http(value: &Map<String, Value>) -> Result<User
         owner: user_ref_from_http(value.get("owner")),
         key: str_value(value.get("key")),
         value: base64_to_bytes_field(value.get("value"), "value")?,
+        typed_value: value
+            .get("typed_value")
+            .map(user_metadata_typed_value_from_http)
+            .transpose()?,
         updated_at: str_value(value.get("updated_at")),
         deleted_at: str_value(value.get("deleted_at")),
         expires_at: str_value(value.get("expires_at")),
         origin_node_id: int_value(value.get("origin_node_id")),
     })
+}
+
+pub(crate) fn user_metadata_typed_value_to_http(value: &UserMetadataTypedValue) -> Value {
+    let mut object = Map::new();
+    object.insert("kind".into(), Value::from(value.kind()));
+    match value {
+        UserMetadataTypedValue::Bytes(bytes) => {
+            object.insert("bytes_value".into(), Value::from(STANDARD.encode(bytes)));
+        }
+        UserMetadataTypedValue::Bool(value) => {
+            object.insert("bool_value".into(), Value::from(*value));
+        }
+        UserMetadataTypedValue::String(value) => {
+            object.insert("string_value".into(), Value::from(value.clone()));
+        }
+        UserMetadataTypedValue::Number(value) => {
+            object.insert("number_value".into(), Value::Number(value.clone()));
+        }
+        UserMetadataTypedValue::Json(value) => {
+            object.insert("json_value".into(), value.clone());
+        }
+    }
+    Value::Object(object)
+}
+
+fn user_metadata_typed_value_from_http(value: &Value) -> Result<UserMetadataTypedValue> {
+    let object = expect_object(value)?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::protocol("missing typed_value.kind"))?;
+    match kind {
+        "bytes" => Ok(UserMetadataTypedValue::Bytes(base64_to_bytes_field(
+            object.get("bytes_value"),
+            "typed_value.bytes_value",
+        )?)),
+        "bool" => object
+            .get("bool_value")
+            .and_then(Value::as_bool)
+            .map(UserMetadataTypedValue::Bool)
+            .ok_or_else(|| Error::protocol("missing typed_value.bool_value")),
+        "string" => object
+            .get("string_value")
+            .and_then(Value::as_str)
+            .map(|value| UserMetadataTypedValue::String(value.to_owned()))
+            .ok_or_else(|| Error::protocol("missing typed_value.string_value")),
+        "number" => match object.get("number_value") {
+            Some(Value::Number(value)) => Ok(UserMetadataTypedValue::Number(value.clone())),
+            Some(_) => Err(Error::protocol(
+                "typed_value.number_value must be a JSON number",
+            )),
+            None => Err(Error::protocol("missing typed_value.number_value")),
+        },
+        "json" => object
+            .get("json_value")
+            .cloned()
+            .map(UserMetadataTypedValue::Json)
+            .ok_or_else(|| Error::protocol("missing typed_value.json_value")),
+        other => Err(Error::protocol(format!(
+            "unsupported typed_value.kind {other:?}"
+        ))),
+    }
 }
 
 pub(crate) fn user_metadata_scan_result_from_http(

@@ -40,8 +40,9 @@ use crate::types::{
 };
 use crate::validation::{
     normalize_login_name, normalize_optional_filter, validate_delivery_mode, validate_login_name,
-    validate_optional_user_metadata_key_fragment, validate_optional_user_ref,
-    validate_positive_i64, validate_session_ref, validate_user_metadata_key,
+    resolve_upsert_user_metadata_value, validate_optional_user_metadata_key_fragment,
+    validate_optional_user_ref, validate_positive_i64, validate_session_ref,
+    validate_upsert_user_metadata_request, validate_user_metadata_key,
     validate_user_metadata_scan_limit, validate_user_ref,
 };
 
@@ -1010,7 +1011,9 @@ impl Client {
 
     /// 获取当前连接用户可通讯的活跃用户列表。
     ///
-    /// `name` 为空时不按名称过滤，`uid={0,0}` 时不按 uid 过滤。
+    /// 服务端会先按当前权限裁剪可见用户集合，再应用 `name` / `uid` 过滤。
+    /// 普通用户可能看不到写入了 `system.visible_to_others=false` 的用户或频道，
+    /// 但这不影响业务侧在已知 `uid` 时继续发消息。
     ///
     /// # Errors
     /// 如果 `uid` 只填写了一部分或包含非正数，返回 `Error::Validation`。
@@ -1041,6 +1044,9 @@ impl Client {
     }
 
     /// 获取用户元数据。
+    ///
+    /// `owner` 可以是普通用户、管理员、超级管理员或 `channel`；系统保留用户不能作为 owner。
+    /// WebSocket/protobuf 响应仍只返回 raw bytes，因此返回值中的 `typed_value` 始终为 `None`。
     ///
     /// # 参数
     /// - `owner` - 元数据所属的用户
@@ -1078,6 +1084,8 @@ impl Client {
     /// 创建或更新用户元数据。
     ///
     /// 如果指定键的元数据已存在则更新，否则创建新的元数据条目。
+    /// protobuf wire 结构保持不变，仍然只发送 raw bytes；
+    /// 当请求里携带 `typed_value` 时，SDK 会先在本地编码成对应的原始字节。
     ///
     /// # 参数
     /// - `owner` - 元数据所属的用户
@@ -1095,6 +1103,8 @@ impl Client {
         validate_user_ref(&owner, "owner")?;
         let key = key.into();
         validate_user_metadata_key(&key, "key")?;
+        validate_upsert_user_metadata_request(&key, &request)?;
+        let value = resolve_upsert_user_metadata_value(&request)?;
         match self
             .rpc(move |request_id| proto::ClientEnvelope {
                 body: Some(proto::client_envelope::Body::UpsertUserMetadata(
@@ -1102,7 +1112,7 @@ impl Client {
                         request_id,
                         owner: Some(user_ref_to_proto(&owner)),
                         key,
-                        value: request.value.into(),
+                        value: value.into(),
                         expires_at: request.expires_at.map(|value| proto::StringField { value }),
                     },
                 )),
@@ -1151,6 +1161,7 @@ impl Client {
     /// 扫描用户元数据。
     ///
     /// 支持按前缀过滤和分页查询。
+    /// WebSocket/protobuf 返回值仍只有 raw bytes，不会附带 HTTP `typed_value` 视图。
     ///
     /// # 参数
     /// - `owner` - 元数据所属的用户

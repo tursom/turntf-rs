@@ -1,5 +1,9 @@
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use serde::de::{self, Deserializer};
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 
 use crate::password::PasswordInput;
@@ -174,10 +178,151 @@ pub struct User {
     pub login_name: String,
 }
 
+/// 系统保留 metadata key 的命名空间前缀。
+pub const USER_METADATA_SYSTEM_PREFIX: &str = "system.";
+
+/// 控制普通用户 `list_users` 可见性的系统 metadata key。
+pub const USER_METADATA_VISIBLE_TO_OTHERS_KEY: &str = "system.visible_to_others";
+
+/// HTTP metadata 的类型化视图。
+///
+/// `typed_value` 只存在于 HTTP JSON 请求/响应中；WebSocket/protobuf 仍然只传输原始字节。
+/// 其中 `Bytes` 变体在 HTTP 请求里会序列化为 base64 字符串。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UserMetadataTypedValue {
+    /// 原始字节（HTTP 请求里映射到 `bytes_value` base64）
+    Bytes(Vec<u8>),
+    /// 布尔值
+    Bool(bool),
+    /// UTF-8 字符串
+    String(String),
+    /// JSON number
+    Number(serde_json::Number),
+    /// 任意 JSON 值
+    Json(serde_json::Value),
+}
+
+impl UserMetadataTypedValue {
+    /// 返回当前类型化 metadata 的 kind 标识。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            UserMetadataTypedValue::Bytes(_) => "bytes",
+            UserMetadataTypedValue::Bool(_) => "bool",
+            UserMetadataTypedValue::String(_) => "string",
+            UserMetadataTypedValue::Number(_) => "number",
+            UserMetadataTypedValue::Json(_) => "json",
+        }
+    }
+
+    /// 按服务端协议把类型化值编码成 metadata 原始字节。
+    pub fn to_raw_bytes(&self) -> Vec<u8> {
+        match self {
+            UserMetadataTypedValue::Bytes(value) => value.clone(),
+            UserMetadataTypedValue::Bool(value) => {
+                if *value {
+                    b"true".to_vec()
+                } else {
+                    b"false".to_vec()
+                }
+            }
+            UserMetadataTypedValue::String(value) => {
+                serde_json::Value::String(value.clone()).to_string().into_bytes()
+            }
+            UserMetadataTypedValue::Number(value) => value.to_string().into_bytes(),
+            UserMetadataTypedValue::Json(value) => value.to_string().into_bytes(),
+        }
+    }
+}
+
+impl Serialize for UserMetadataTypedValue {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("kind", self.kind())?;
+        match self {
+            UserMetadataTypedValue::Bytes(value) => {
+                map.serialize_entry("bytes_value", &STANDARD.encode(value))?;
+            }
+            UserMetadataTypedValue::Bool(value) => {
+                map.serialize_entry("bool_value", value)?;
+            }
+            UserMetadataTypedValue::String(value) => {
+                map.serialize_entry("string_value", value)?;
+            }
+            UserMetadataTypedValue::Number(value) => {
+                map.serialize_entry("number_value", value)?;
+            }
+            UserMetadataTypedValue::Json(value) => {
+                map.serialize_entry("json_value", value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for UserMetadataTypedValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| de::Error::custom("typed_value must be an object"))?;
+        let kind = object
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| de::Error::custom("typed_value.kind is required"))?;
+        match kind {
+            "bytes" => {
+                let encoded = object
+                    .get("bytes_value")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| de::Error::custom("typed_value.bytes_value is required"))?;
+                let decoded = STANDARD.decode(encoded).map_err(|err| {
+                    de::Error::custom(format!("typed_value.bytes_value must be base64: {err}"))
+                })?;
+                Ok(UserMetadataTypedValue::Bytes(decoded))
+            }
+            "bool" => object
+                .get("bool_value")
+                .and_then(serde_json::Value::as_bool)
+                .map(UserMetadataTypedValue::Bool)
+                .ok_or_else(|| de::Error::custom("typed_value.bool_value is required")),
+            "string" => object
+                .get("string_value")
+                .and_then(serde_json::Value::as_str)
+                .map(|value| UserMetadataTypedValue::String(value.to_owned()))
+                .ok_or_else(|| de::Error::custom("typed_value.string_value is required")),
+            "number" => match object.get("number_value") {
+                Some(serde_json::Value::Number(value)) => {
+                    Ok(UserMetadataTypedValue::Number(value.clone()))
+                }
+                Some(_) => Err(de::Error::custom(
+                    "typed_value.number_value must be a JSON number",
+                )),
+                None => Err(de::Error::custom(
+                    "typed_value.number_value is required",
+                )),
+            },
+            "json" => object
+                .get("json_value")
+                .cloned()
+                .map(UserMetadataTypedValue::Json)
+                .ok_or_else(|| de::Error::custom("typed_value.json_value is required")),
+            other => Err(de::Error::custom(format!(
+                "unsupported typed_value.kind {other:?}"
+            ))),
+        }
+    }
+}
+
 /// 用户元数据，关联到特定用户的键值对数据。
 ///
 /// 元数据支持设置过期时间（`expires_at`），过期后自动失效。
-/// 值以字节数组存储，调用方负责编码和解码。
+/// `value` 始终是原始字节；HTTP 响应在可稳定解释时会额外填充 `typed_value`。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMetadata {
     /// 元数据所属的用户
@@ -186,6 +331,8 @@ pub struct UserMetadata {
     pub key: String,
     /// 元数据值（字节数组）
     pub value: Vec<u8>,
+    /// HTTP JSON 返回的类型化视图；WebSocket/protobuf 响应始终为 `None`
+    pub typed_value: Option<UserMetadataTypedValue>,
     /// 最后更新时间
     pub updated_at: String,
     /// 删除时间（为空表示未删除）
@@ -601,10 +748,43 @@ pub struct UpdateUserRequest {
 /// 创建或更新用户元数据的请求参数。
 #[derive(Clone, Debug, Default)]
 pub struct UpsertUserMetadataRequest {
-    /// 元数据的值（字节数组）
+    /// 元数据的原始字节值。
+    ///
+    /// 当 `typed_value` 为 `None` 时会走这个原始值；保留为空时表示写入空字节数组。
     pub value: Vec<u8>,
+    /// HTTP metadata 的类型化写入视图。
+    ///
+    /// 与 `value` 互斥；当它存在时，HTTP 会发送 `typed_value`，WebSocket/protobuf 则会先在本地
+    /// 编码成 raw bytes 再走现有 wire 结构。
+    pub typed_value: Option<UserMetadataTypedValue>,
     /// 过期时间（可选）。为空表示永不过期。
     pub expires_at: Option<String>,
+}
+
+impl UpsertUserMetadataRequest {
+    /// 使用原始字节值创建 metadata upsert 请求。
+    pub fn raw(value: impl Into<Vec<u8>>) -> Self {
+        Self {
+            value: value.into(),
+            typed_value: None,
+            expires_at: None,
+        }
+    }
+
+    /// 使用 HTTP `typed_value` 视图创建 metadata upsert 请求。
+    pub fn typed(typed_value: UserMetadataTypedValue) -> Self {
+        Self {
+            value: Vec::new(),
+            typed_value: Some(typed_value),
+            expires_at: None,
+        }
+    }
+
+    /// 为请求补充 `expires_at`。
+    pub fn with_expires_at(mut self, expires_at: impl Into<String>) -> Self {
+        self.expires_at = Some(expires_at.into());
+        self
+    }
 }
 
 /// 扫描用户元数据的请求参数。

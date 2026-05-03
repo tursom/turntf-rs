@@ -15,7 +15,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use turntf::{
     plain_password, Client, ClientEvent, Config, CreateUserRequest, CursorStore, DeliveryMode,
     ListUsersRequest, MemoryCursorStore, Message, MessageCursor, ScanUserMetadataRequest,
-    SessionRef, UpdateUserRequest, UpsertUserMetadataRequest,
+    SessionRef, UpdateUserRequest, UpsertUserMetadataRequest, UserMetadataTypedValue,
+    USER_METADATA_VISIBLE_TO_OTHERS_KEY,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -1546,6 +1547,7 @@ async fn client_user_metadata_crud_and_scan() {
             "session:web:1",
             UpsertUserMetadataRequest {
                 value: vec![0x00, 0xfe],
+                typed_value: None,
                 expires_at: Some("2026-05-01T12:00:00Z".into()),
             },
         )
