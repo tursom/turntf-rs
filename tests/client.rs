@@ -14,8 +14,8 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use turntf::{
     plain_password, Client, ClientEvent, Config, CreateUserRequest, CursorStore, DeliveryMode,
-    MemoryCursorStore, Message, MessageCursor, ScanUserMetadataRequest, SessionRef,
-    UpdateUserRequest, UpsertUserMetadataRequest,
+    ListUsersRequest, MemoryCursorStore, Message, MessageCursor, ScanUserMetadataRequest,
+    SessionRef, UpdateUserRequest, UpsertUserMetadataRequest,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -391,6 +391,16 @@ struct ScanUserMetadataRequestProto {
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
+struct ListUsersRequestProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(string, tag = "2")]
+    name: String,
+    #[prost(message, optional, tag = "3")]
+    uid: Option<UserRefProto>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
 struct GetUserMetadataResponseProto {
     #[prost(uint64, tag = "1")]
     request_id: u64,
@@ -427,10 +437,20 @@ struct ScanUserMetadataResponseProto {
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
+struct ListUsersResponseProto {
+    #[prost(uint64, tag = "1")]
+    request_id: u64,
+    #[prost(message, repeated, tag = "2")]
+    items: Vec<UserProto>,
+    #[prost(int32, tag = "3")]
+    count: i32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
 struct ClientEnvelopeProto {
     #[prost(
         oneof = "client_envelope_proto::Body",
-        tags = "1, 2, 3, 4, 5, 7, 18, 19, 20, 21, 22"
+        tags = "1, 2, 3, 4, 5, 7, 18, 19, 20, 21, 22, 23"
     )]
     body: Option<client_envelope_proto::Body>,
 }
@@ -460,6 +480,8 @@ mod client_envelope_proto {
         DeleteUserMetadata(super::DeleteUserMetadataRequestProto),
         #[prost(message, tag = "22")]
         ScanUserMetadata(super::ScanUserMetadataRequestProto),
+        #[prost(message, tag = "23")]
+        ListUsers(super::ListUsersRequestProto),
     }
 }
 
@@ -467,7 +489,7 @@ mod client_envelope_proto {
 struct ServerEnvelopeProto {
     #[prost(
         oneof = "server_envelope_proto::Body",
-        tags = "1, 2, 3, 4, 5, 6, 7, 9, 20, 21, 22, 23, 24"
+        tags = "1, 2, 3, 4, 5, 6, 7, 9, 20, 21, 22, 23, 24, 25"
     )]
     body: Option<server_envelope_proto::Body>,
 }
@@ -501,6 +523,8 @@ mod server_envelope_proto {
         DeleteUserMetadataResponse(super::DeleteUserMetadataResponseProto),
         #[prost(message, tag = "24")]
         ScanUserMetadataResponse(super::ScanUserMetadataResponseProto),
+        #[prost(message, tag = "25")]
+        ListUsersResponse(super::ListUsersResponseProto),
     }
 }
 
@@ -1208,6 +1232,170 @@ async fn client_logs_in_with_login_name_selector_and_clears_login_name() {
 }
 
 #[tokio::test]
+async fn client_lists_communicable_users_with_filters() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let paths = Arc::new(StdMutex::new(Vec::new()));
+    let paths_for_server = Arc::clone(&paths);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept_ws(&listener, paths_for_server).await;
+        let login = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::Login(_) = login.body.unwrap() else {
+            panic!("expected login request");
+        };
+
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::LoginResponse(
+                    LoginResponseProto {
+                        user: Some(UserProto {
+                            node_id: 4096,
+                            user_id: 1025,
+                            username: "alice".into(),
+                            role: "user".into(),
+                            profile_json: br#"{"display_name":"Alice"}"#.to_vec(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                            login_name: "alice.login".into(),
+                        }),
+                        protocol_version: "client-v1alpha1".into(),
+                        session_ref: Some(session_ref("list-users-session")),
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let filtered = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::ListUsers(filtered) = filtered.body.unwrap() else {
+            panic!("expected list_users request");
+        };
+        assert_eq!(filtered.request_id, 1);
+        assert_eq!(filtered.name, "carol visible");
+        assert_eq!(filtered.uid, Some(user_ref(4096, 1027)));
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::ListUsersResponse(
+                    ListUsersResponseProto {
+                        request_id: filtered.request_id,
+                        items: vec![UserProto {
+                            node_id: 4096,
+                            user_id: 1027,
+                            username: "carol".into(),
+                            role: "user".into(),
+                            profile_json: br#"{"display_name":"Carol Visible"}"#.to_vec(),
+                            system_reserved: false,
+                            created_at: String::new(),
+                            updated_at: String::new(),
+                            origin_node_id: 4096,
+                            login_name: String::new(),
+                        }],
+                        count: 1,
+                    },
+                )),
+            },
+        )
+        .await;
+
+        let all = read_client_envelope(&mut ws).await;
+        let client_envelope_proto::Body::ListUsers(all) = all.body.unwrap() else {
+            panic!("expected list_users request");
+        };
+        assert_eq!(all.request_id, 2);
+        assert!(all.name.is_empty());
+        assert!(all.uid.is_none());
+        send_server_envelope(
+            &mut ws,
+            ServerEnvelopeProto {
+                body: Some(server_envelope_proto::Body::ListUsersResponse(
+                    ListUsersResponseProto {
+                        request_id: all.request_id,
+                        items: vec![
+                            UserProto {
+                                node_id: 4096,
+                                user_id: 1025,
+                                username: "alice".into(),
+                                role: "user".into(),
+                                profile_json: br#"{"display_name":"Alice"}"#.to_vec(),
+                                system_reserved: false,
+                                created_at: String::new(),
+                                updated_at: String::new(),
+                                origin_node_id: 4096,
+                                login_name: "alice.login".into(),
+                            },
+                            UserProto {
+                                node_id: 4096,
+                                user_id: 1027,
+                                username: "carol".into(),
+                                role: "user".into(),
+                                profile_json: br#"{"display_name":"Carol Visible"}"#.to_vec(),
+                                system_reserved: false,
+                                created_at: String::new(),
+                                updated_at: String::new(),
+                                origin_node_id: 4096,
+                                login_name: String::new(),
+                            },
+                        ],
+                        count: 2,
+                    },
+                )),
+            },
+        )
+        .await;
+    });
+
+    let mut config = Config::new(
+        format!("http://{address}"),
+        turntf::Credentials {
+            node_id: 4096,
+            user_id: 1025,
+            password: plain_password("alice-password").unwrap(),
+        },
+    );
+    config.ping_interval = Duration::from_secs(3600);
+    let client = Client::new(config).unwrap();
+    let mut events = client.subscribe().await;
+
+    client.connect().await.unwrap();
+    let _ = next_event(&mut events).await.unwrap();
+
+    let filtered = client
+        .list_users(ListUsersRequest {
+            name: "  carol visible  ".into(),
+            uid: turntf::UserRef {
+                node_id: 4096,
+                user_id: 1027,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].username, "carol");
+    assert!(filtered[0].login_name.is_empty());
+    assert_eq!(
+        filtered[0].profile_json,
+        br#"{"display_name":"Carol Visible"}"#
+    );
+
+    let all = client
+        .list_users(ListUsersRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].login_name, "alice.login");
+    assert!(all[1].login_name.is_empty());
+
+    client.close().await.unwrap();
+    server.await.unwrap();
+    assert_eq!(&*paths.lock().unwrap(), &["/ws/client".to_string()]);
+}
+
+#[tokio::test]
 async fn client_user_metadata_crud_and_scan() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1467,6 +1655,32 @@ async fn client_user_metadata_validates_inputs_before_rpc() {
                 limit: -1,
             },
         )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
+}
+
+#[tokio::test]
+async fn client_list_users_validates_uid_before_rpc() {
+    let mut config = Config::new(
+        "http://127.0.0.1:65535",
+        turntf::Credentials {
+            node_id: 4096,
+            user_id: 1025,
+            password: plain_password("alice-password").unwrap(),
+        },
+    );
+    config.ping_interval = Duration::from_secs(3600);
+    let client = Client::new(config).unwrap();
+
+    let error = client
+        .list_users(ListUsersRequest {
+            uid: turntf::UserRef {
+                node_id: 4096,
+                user_id: 0,
+            },
+            ..ListUsersRequest::default()
+        })
         .await
         .unwrap_err();
     assert!(matches!(error, turntf::Error::Validation(_)));

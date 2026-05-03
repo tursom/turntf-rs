@@ -7,17 +7,17 @@ use std::time::Duration;
 
 use prost::Message as ProstMessage;
 use tokio::sync::broadcast;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::client::Client;
 use crate::proto;
 use crate::types::{
     DeliveryMode, Packet, RelayConfig, RelayEnvelope, RelayError, RelayKind, RelayState,
-    Reliability, SessionRef, UserRef,
-    RELAY_ERROR_CLIENT_CLOSED, RELAY_ERROR_DUPLICATE_OPEN, RELAY_ERROR_MAX_RETRANSMIT,
-    RELAY_ERROR_NOT_CONNECTED, RELAY_ERROR_OPEN_TIMEOUT, RELAY_ERROR_PROTOCOL,
-    RELAY_ERROR_REMOTE_CLOSE, RELAY_ERROR_SEND_TIMEOUT, RELAY_ERROR_RECEIVE_TIMEOUT,
+    Reliability, SessionRef, UserRef, RELAY_ERROR_CLIENT_CLOSED, RELAY_ERROR_DUPLICATE_OPEN,
+    RELAY_ERROR_MAX_RETRANSMIT, RELAY_ERROR_NOT_CONNECTED, RELAY_ERROR_OPEN_TIMEOUT,
+    RELAY_ERROR_PROTOCOL, RELAY_ERROR_RECEIVE_TIMEOUT, RELAY_ERROR_REMOTE_CLOSE,
+    RELAY_ERROR_SEND_TIMEOUT,
 };
 
 // ===== Helper functions =====
@@ -33,26 +33,26 @@ fn new_relay_id() -> String {
 
 fn relay_kind_to_proto(kind: RelayKind) -> i32 {
     match kind {
-        RelayKind::Open => proto::RelayKind::RelayKindOpen as i32,
-        RelayKind::OpenAck => proto::RelayKind::RelayKindOpenAck as i32,
-        RelayKind::Data => proto::RelayKind::RelayKindData as i32,
-        RelayKind::Ack => proto::RelayKind::RelayKindAck as i32,
-        RelayKind::Close => proto::RelayKind::RelayKindClose as i32,
-        RelayKind::Ping => proto::RelayKind::RelayKindPing as i32,
-        RelayKind::Error => proto::RelayKind::RelayKindError as i32,
-        _ => proto::RelayKind::RelayKindUnspecified as i32,
+        RelayKind::Open => proto::RelayKind::Open as i32,
+        RelayKind::OpenAck => proto::RelayKind::OpenAck as i32,
+        RelayKind::Data => proto::RelayKind::Data as i32,
+        RelayKind::Ack => proto::RelayKind::Ack as i32,
+        RelayKind::Close => proto::RelayKind::Close as i32,
+        RelayKind::Ping => proto::RelayKind::Ping as i32,
+        RelayKind::Error => proto::RelayKind::Error as i32,
+        _ => proto::RelayKind::Unspecified as i32,
     }
 }
 
 fn relay_kind_from_proto(kind: i32) -> RelayKind {
     match proto::RelayKind::try_from(kind) {
-        Ok(proto::RelayKind::RelayKindOpen) => RelayKind::Open,
-        Ok(proto::RelayKind::RelayKindOpenAck) => RelayKind::OpenAck,
-        Ok(proto::RelayKind::RelayKindData) => RelayKind::Data,
-        Ok(proto::RelayKind::RelayKindAck) => RelayKind::Ack,
-        Ok(proto::RelayKind::RelayKindClose) => RelayKind::Close,
-        Ok(proto::RelayKind::RelayKindPing) => RelayKind::Ping,
-        Ok(proto::RelayKind::RelayKindError) => RelayKind::Error,
+        Ok(proto::RelayKind::Open) => RelayKind::Open,
+        Ok(proto::RelayKind::OpenAck) => RelayKind::OpenAck,
+        Ok(proto::RelayKind::Data) => RelayKind::Data,
+        Ok(proto::RelayKind::Ack) => RelayKind::Ack,
+        Ok(proto::RelayKind::Close) => RelayKind::Close,
+        Ok(proto::RelayKind::Ping) => RelayKind::Ping,
+        Ok(proto::RelayKind::Error) => RelayKind::Error,
         _ => RelayKind::Unspecified,
     }
 }
@@ -71,7 +71,7 @@ fn encode_relay_envelope(env: &RelayEnvelope) -> Result<Vec<u8>, String> {
         }),
         seq: env.seq,
         ack_seq: env.ack_seq,
-        payload: env.payload.clone(),
+        payload: env.payload.clone().into(),
         sent_at_ms: env.sent_at_ms,
     };
     Ok(pb_env.encode_to_vec())
@@ -101,7 +101,7 @@ fn decode_relay_envelope(data: &[u8]) -> Result<RelayEnvelope, String> {
             .unwrap_or_default(),
         seq: pb_env.seq,
         ack_seq: pb_env.ack_seq,
-        payload: pb_env.payload,
+        payload: pb_env.payload.to_vec(),
         sent_at_ms: pb_env.sent_at_ms,
     })
 }
@@ -362,7 +362,10 @@ struct RelayConnectionInner {
 }
 
 impl RelayConnectionInner {
-    async fn send_relay_envelope(&self, env: &RelayEnvelope) -> std::result::Result<(), RelayError> {
+    async fn send_relay_envelope(
+        &self,
+        env: &RelayEnvelope,
+    ) -> std::result::Result<(), RelayError> {
         let body =
             encode_relay_envelope(env).map_err(|e| RelayError::new(RELAY_ERROR_PROTOCOL, e))?;
 
@@ -424,7 +427,7 @@ impl RelayConnectionInner {
                     // 交付所有可连续交付的缓冲帧
                     let mut buf = self.recv_buf.lock().await;
                     loop {
-                        if let Some(data) = buf.remove(expected) {
+                        if let Some(data) = buf.remove(&*expected) {
                             let _ = self.recv_tx.send(data);
                             *expected += 1;
                         } else {
@@ -472,7 +475,7 @@ impl RelayConnectionInner {
         }
     }
 
-    async fn handle_ping(&self, env: &RelayEnvelope) {
+    async fn handle_ping(&self, _env: &RelayEnvelope) {
         let err_env = RelayEnvelope {
             relay_id: self.relay_id.clone(),
             kind: RelayKind::Error,
@@ -808,9 +811,10 @@ impl Relay {
         let cfg = config.unwrap_or_default();
 
         // 3. 获取当前登录的会话引用
-        let my_session = self.inner.client.session_ref().await.ok_or_else(|| {
-            RelayError::new(RELAY_ERROR_NOT_CONNECTED, "client not logged in")
-        })?;
+        let my_session =
+            self.inner.client.session_ref().await.ok_or_else(|| {
+                RelayError::new(RELAY_ERROR_NOT_CONNECTED, "client not logged in")
+            })?;
 
         let relay_id = new_relay_id();
 
@@ -918,7 +922,7 @@ impl Relay {
     // ---- 内部方法 ----
 
     /// 异步处理入站数据包（由后台任务调用）。
-    async fn handle_packet_async(inner: &RelayInner, packet: Packet) -> bool {
+    async fn handle_packet_async(inner: &Arc<RelayInner>, packet: Packet) -> bool {
         let env = match decode_relay_envelope(&packet.body) {
             Ok(env) => env,
             Err(_) => return false,
@@ -929,7 +933,7 @@ impl Relay {
     }
 
     /// 核心分发逻辑。
-    async fn handle_envelope_inner(inner: &RelayInner, env: RelayEnvelope) {
+    async fn handle_envelope_inner(inner: &Arc<RelayInner>, env: RelayEnvelope) {
         let relay_id = env.relay_id.clone();
         let kind = env.kind;
 

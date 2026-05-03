@@ -2,6 +2,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use reqwest::{Client as ReqwestClient, Method};
 use serde_json::{Map, Value};
+use url::form_urlencoded;
 
 use crate::errors::{Error, Result, ServerError};
 use crate::mapping::{
@@ -14,14 +15,15 @@ use crate::mapping::{
 use crate::password::{plain_password, PasswordInput};
 use crate::types::{
     Attachment, AttachmentType, BlacklistEntry, ClusterNode, CreateUserRequest, DeleteUserResult,
-    DeliveryMode, Event, LoggedInUser, Message, OperationsStatus, RelayAccepted,
+    DeliveryMode, Event, ListUsersRequest, LoggedInUser, Message, OperationsStatus, RelayAccepted,
     ScanUserMetadataRequest, Subscription, UpdateUserRequest, UpsertUserMetadataRequest, User,
     UserMetadata, UserMetadataScanResult, UserRef,
 };
 use crate::validation::{
-    normalize_login_name, validate_delivery_mode, validate_login_name,
-    validate_optional_user_metadata_key_fragment, validate_positive_i64,
-    validate_user_metadata_key, validate_user_metadata_scan_limit, validate_user_ref,
+    normalize_login_name, normalize_optional_filter, validate_delivery_mode, validate_login_name,
+    validate_optional_user_metadata_key_fragment, validate_optional_user_ref,
+    validate_positive_i64, validate_user_metadata_key, validate_user_metadata_scan_limit,
+    validate_user_ref,
 };
 
 /// HTTP 客户端，用于通过 REST API 与 turntf 服务器通信。
@@ -388,6 +390,43 @@ impl HttpClient {
         delete_user_result_from_http(expect_object(&response)?)
     }
 
+    /// 获取当前用户可通讯的活跃用户列表。
+    ///
+    /// # 参数
+    /// - `token` - 认证令牌
+    /// - `request` - 过滤条件；`name` 为空时不按名称过滤，`uid={0,0}` 时不按 uid 过滤
+    ///
+    /// # Errors
+    /// 如果 `uid` 只填写了一部分或包含非正数，返回 `Error::Validation`。
+    pub async fn list_users(&self, token: &str, request: ListUsersRequest) -> Result<Vec<User>> {
+        let ListUsersRequest { name, uid } = request;
+        let name = normalize_optional_filter(&name);
+        let has_uid = validate_optional_user_ref(&uid, "request.uid")?;
+
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        if let Some(name) = name {
+            query.append_pair("name", &name);
+        }
+        if has_uid {
+            query.append_pair("uid", &format!("{}:{}", uid.node_id, uid.user_id));
+        }
+        let query = query.finish();
+        let path = if query.is_empty() {
+            "/users".to_owned()
+        } else {
+            format!("/users?{query}")
+        };
+
+        let response = self
+            .request_json(Method::GET, &path, token, None, &[200])
+            .await?;
+        items_from_payload(&response, &["items"])?
+            .into_iter()
+            .map(expect_object)
+            .map(|value| value.and_then(user_from_http))
+            .collect()
+    }
+
     /// 获取用户元数据。
     ///
     /// # 参数
@@ -663,7 +702,9 @@ impl HttpClient {
         }
         if let (Some(peer_nid), Some(peer_uid)) = (peer_node_id, peer_user_id) {
             let sep = if suffix.is_empty() { "?" } else { "&" };
-            suffix.push_str(&format!("{sep}peer_node_id={peer_nid}&peer_user_id={peer_uid}"));
+            suffix.push_str(&format!(
+                "{sep}peer_node_id={peer_nid}&peer_user_id={peer_uid}"
+            ));
         }
         let response = self
             .request_json(

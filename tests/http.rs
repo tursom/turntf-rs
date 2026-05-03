@@ -9,8 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use turntf::{
-    plain_password, CreateUserRequest, DeliveryMode, HttpClient, ScanUserMetadataRequest,
-    UpdateUserRequest, UpsertUserMetadataRequest, UserRef,
+    plain_password, CreateUserRequest, DeliveryMode, HttpClient, ListUsersRequest,
+    ScanUserMetadataRequest, UpdateUserRequest, UpsertUserMetadataRequest, UserRef,
 };
 
 #[derive(Debug)]
@@ -213,6 +213,40 @@ async fn http_client_requests_and_encoding() {
                     201,
                 )
             }
+            ("GET", "/users") => HttpTestResponse::json(
+                json!([
+                    {
+                        "node_id": 4096,
+                        "user_id": 1025,
+                        "username": "alice",
+                        "login_name": "alice.login",
+                        "role": "user",
+                        "profile": { "display_name": "Alice" }
+                    },
+                    {
+                        "node_id": 4096,
+                        "user_id": 1027,
+                        "username": "carol",
+                        "login_name": "",
+                        "role": "user",
+                        "profile": { "display_name": "Carol Visible" }
+                    }
+                ]),
+                200,
+            ),
+            ("GET", "/users?name=carol+visible&uid=4096%3A1027") => HttpTestResponse::json(
+                json!([
+                    {
+                        "node_id": 4096,
+                        "user_id": 1027,
+                        "username": "carol",
+                        "login_name": "",
+                        "role": "user",
+                        "profile": { "display_name": "Carol Visible" }
+                    }
+                ]),
+                200,
+            ),
             ("GET", "/nodes/4096/users/1025") => HttpTestResponse::json(
                 json!({
                     "node_id": 4096,
@@ -572,6 +606,35 @@ async fn http_client_requests_and_encoding() {
     assert_eq!(fetched.username, "alice");
     assert_eq!(fetched.login_name, "alice.login");
 
+    let visible_users = client
+        .list_users(&token, ListUsersRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(visible_users.len(), 2);
+    assert_eq!(visible_users[0].login_name, "alice.login");
+    assert!(visible_users[1].login_name.is_empty());
+
+    let filtered_users = client
+        .list_users(
+            &token,
+            ListUsersRequest {
+                name: "  carol visible  ".into(),
+                uid: UserRef {
+                    node_id: 4096,
+                    user_id: 1027,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(filtered_users.len(), 1);
+    assert_eq!(filtered_users[0].username, "carol");
+    assert!(filtered_users[0].login_name.is_empty());
+    assert_eq!(
+        filtered_users[0].profile_json,
+        br#"{"display_name":"Carol Visible"}"#
+    );
+
     let updated = client
         .update_user(
             &token,
@@ -885,6 +948,21 @@ async fn http_client_maps_server_errors_and_validates_node_id() {
                 prefix: String::new(),
                 after: String::new(),
                 limit: -1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, turntf::Error::Validation(_)));
+
+    let error = client
+        .list_users(
+            "token",
+            ListUsersRequest {
+                uid: UserRef {
+                    node_id: 4096,
+                    user_id: 0,
+                },
+                ..ListUsersRequest::default()
             },
         )
         .await

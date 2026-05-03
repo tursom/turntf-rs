@@ -618,6 +618,18 @@ pub struct ScanUserMetadataRequest {
     pub limit: i32,
 }
 
+/// 查询可通讯用户列表的请求参数。
+///
+/// `name` 为空或仅包含空白时，表示不按名称过滤。
+/// `uid` 为 `UserRef::default()` 时，表示不按 uid 过滤。
+#[derive(Clone, Debug, Default)]
+pub struct ListUsersRequest {
+    /// 名称过滤条件，服务端会执行大小写不敏感子串匹配。
+    pub name: String,
+    /// 目标用户引用；当 `node_id` 和 `user_id` 都为 0 时表示不按 uid 过滤。
+    pub uid: UserRef,
+}
+
 /// 客户端配置的默认值。
 ///
 /// 此结构体定义了 `Config` 中各配置项的默认值，通过 `Default` trait 提供默认实现。

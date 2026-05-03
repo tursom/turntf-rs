@@ -25,7 +25,7 @@ use turntf::{
     Message, Packet, RelayAccepted,
     Attachment, Subscription, BlacklistEntry, Event,
     ClusterNode, LoggedInUser, OnlineNodePresence, ResolvedSession, ResolvedUserSessions,
-    Credentials, LoginInfo, CreateUserRequest, UpdateUserRequest,
+    Credentials, LoginInfo, CreateUserRequest, UpdateUserRequest, ListUsersRequest,
     UpsertUserMetadataRequest, ScanUserMetadataRequest,
     DeleteUserResult, OperationsStatus,
 };
@@ -75,6 +75,9 @@ pub async fn update_user(&self, target: UserRef, request: UpdateUserRequest) -> 
 
 // 删除用户
 pub async fn delete_user(&self, target: UserRef) -> Result<DeleteUserResult>
+
+// 查询当前连接用户可通讯的活跃用户列表
+pub async fn list_users(&self, request: ListUsersRequest) -> Result<Vec<User>>
 ```
 
 ### 消息与瞬时包
@@ -392,6 +395,13 @@ pub async fn update_user(
 
 // 删除用户
 pub async fn delete_user(&self, token: &str, target: UserRef) -> Result<DeleteUserResult>
+
+// 查询当前 token 对应用户可通讯的活跃用户列表
+pub async fn list_users(
+    &self,
+    token: &str,
+    request: ListUsersRequest,
+) -> Result<Vec<User>>
 ```
 
 ### 消息与瞬时包
@@ -537,6 +547,12 @@ pub struct SessionRef {
 pub struct MessageCursor {
     pub node_id: i64,
     pub seq: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ListUsersRequest {
+    pub name: String,
+    pub uid: UserRef,
 }
 ```
 

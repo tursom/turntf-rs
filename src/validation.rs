@@ -57,6 +57,27 @@ pub fn validate_user_ref(value: &UserRef, field: &str) -> Result<()> {
     Ok(())
 }
 
+/// 验证可选用户引用。
+///
+/// 当 `node_id` 和 `user_id` 都为 0 时，视为“未设置”，返回 `Ok(false)`。
+/// 其余情况下要求两个字段都为正数，返回 `Ok(true)`。
+pub(crate) fn validate_optional_user_ref(value: &UserRef, field: &str) -> Result<bool> {
+    if value.node_id == 0 && value.user_id == 0 {
+        return Ok(false);
+    }
+    validate_user_ref(value, field)?;
+    Ok(true)
+}
+
+pub(crate) fn normalize_optional_filter(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
 /// 验证会话引用（SessionRef）的有效性。
 ///
 /// # 参数

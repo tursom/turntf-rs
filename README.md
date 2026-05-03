@@ -84,7 +84,7 @@ let token = client.login_by_login_name("root.login", "root-password").await?;
 | 类别 | 方法 |
 |------|------|
 | 认证 | `login`, `login_by_login_name`, `login_with_password`, `login_by_login_name_with_password` |
-| 用户管理 | `create_user`, `get_user`, `update_user`, `delete_user`, `create_channel` |
+| 用户管理 | `create_user`, `get_user`, `update_user`, `delete_user`, `create_channel`, `list_users` |
 | 元数据 | `get_user_metadata`, `upsert_user_metadata`, `delete_user_metadata`, `scan_user_metadata` |
 | 消息收发 | `list_messages`, `post_message`, `post_packet` |
 | 频道订阅 | `subscribe_channel`, `unsubscribe_channel`, `list_subscriptions`, `create_subscription` |
@@ -220,7 +220,7 @@ async fn send_targeted_packet(client: &Client, target: UserRef) -> Result<(), Er
 |------|------|
 | 生命周期 | `new`, `connect`, `close`, `subscribe`, `http` |
 | 消息收发 | `send_message` / `post_message`, `send_packet`, `send_packet_to_session`, `list_messages` |
-| 用户管理 | `create_user`, `get_user`, `update_user`, `delete_user`, `create_channel` |
+| 用户管理 | `create_user`, `get_user`, `update_user`, `delete_user`, `create_channel`, `list_users` |
 | 元数据 | `get_user_metadata`, `upsert_user_metadata`, `delete_user_metadata`, `scan_user_metadata` |
 | 频道订阅 | `subscribe_channel`, `create_subscription`, `unsubscribe_channel`, `list_subscriptions` |
 | 黑名单 | `block_user`, `unblock_user`, `list_blocked_users` |
@@ -251,6 +251,7 @@ async fn send_targeted_packet(client: &Client, target: UserRef) -> Result<(), Er
 ## 共享语义速记
 
 - `Client` 长连接鉴权使用首帧 `LoginRequest`，不是 HTTP token。
+- `list_users` 返回当前登录用户可通讯的活跃用户集合；通过 `ListUsersRequest { name, uid }` 传过滤条件，其中空白 `name` 和 `uid={0,0}` 都表示“不过滤”。
 - 收到持久化消息时，Rust SDK 会先执行 `save_message -> save_cursor`，只有两步都成功后才会在 `ack_messages=true` 时发送 `AckMessage`。
 - `PacketPushed` 不参与消息游标、不会补发、也不会自动 ACK。
 - 自动重连会重新发送登录帧，并把 `cursor_store.load_seen_messages()` 返回的游标放进 `seen_messages`。

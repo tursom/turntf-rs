@@ -33,15 +33,16 @@ use crate::proto;
 use crate::store::CursorStore;
 use crate::types::{
     default_cursor_store, Attachment, AttachmentType, BlacklistEntry, ClientConfigDefaults,
-    ClusterNode, CreateUserRequest, Credentials, DeleteUserResult, DeliveryMode, Event, LoggedInUser,
-    LoginInfo, Message, OperationsStatus, Packet, RelayAccepted, ResolvedUserSessions,
-    ScanUserMetadataRequest, SessionRef, Subscription, UpdateUserRequest, UpsertUserMetadataRequest,
-    User, UserMetadata, UserMetadataScanResult, UserRef,
+    ClusterNode, CreateUserRequest, Credentials, DeleteUserResult, DeliveryMode, Event,
+    ListUsersRequest, LoggedInUser, LoginInfo, Message, OperationsStatus, Packet, RelayAccepted,
+    ResolvedUserSessions, ScanUserMetadataRequest, SessionRef, Subscription, UpdateUserRequest,
+    UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult, UserRef,
 };
 use crate::validation::{
-    normalize_login_name, validate_delivery_mode, validate_login_name,
-    validate_optional_user_metadata_key_fragment, validate_positive_i64, validate_session_ref,
-    validate_user_metadata_key, validate_user_metadata_scan_limit, validate_user_ref,
+    normalize_login_name, normalize_optional_filter, validate_delivery_mode, validate_login_name,
+    validate_optional_user_metadata_key_fragment, validate_optional_user_ref,
+    validate_positive_i64, validate_session_ref, validate_user_metadata_key,
+    validate_user_metadata_scan_limit, validate_user_ref,
 };
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -337,6 +338,7 @@ enum RpcValue {
     Message(Message),
     RelayAccepted(RelayAccepted),
     User(User),
+    Users(Vec<User>),
     DeleteUserResult(DeleteUserResult),
     UserMetadata(UserMetadata),
     UserMetadataScanResult(UserMetadataScanResult),
@@ -1003,6 +1005,38 @@ impl Client {
         {
             RpcValue::DeleteUserResult(result) => Ok(result),
             _ => Err(Error::protocol("missing status in delete_user_response")),
+        }
+    }
+
+    /// 获取当前连接用户可通讯的活跃用户列表。
+    ///
+    /// `name` 为空时不按名称过滤，`uid={0,0}` 时不按 uid 过滤。
+    ///
+    /// # Errors
+    /// 如果 `uid` 只填写了一部分或包含非正数，返回 `Error::Validation`。
+    pub async fn list_users(&self, request: ListUsersRequest) -> Result<Vec<User>> {
+        let ListUsersRequest { name, uid } = request;
+        let name = normalize_optional_filter(&name).unwrap_or_default();
+        let has_uid = validate_optional_user_ref(&uid, "request.uid")?;
+
+        match self
+            .rpc(move |request_id| proto::ClientEnvelope {
+                body: Some(proto::client_envelope::Body::ListUsers(
+                    proto::ListUsersRequest {
+                        request_id,
+                        name,
+                        uid: if has_uid {
+                            Some(user_ref_to_proto(&uid))
+                        } else {
+                            None
+                        },
+                    },
+                )),
+            })
+            .await?
+        {
+            RpcValue::Users(items) => Ok(items),
+            _ => Err(Error::protocol("missing items in list_users_response")),
         }
     }
 
@@ -1774,6 +1808,13 @@ impl Inner {
                 )
                 .await;
             }
+            Some(proto::server_envelope::Body::ListUsersResponse(response)) => {
+                self.resolve_pending(
+                    response.request_id,
+                    Ok(RpcValue::Users(users_from_proto(&response.items)?)),
+                )
+                .await;
+            }
             Some(proto::server_envelope::Body::GetUserMetadataResponse(response)) => {
                 self.resolve_pending(
                     response.request_id,
@@ -2176,6 +2217,13 @@ fn messages_from_proto(items: &[proto::Message]) -> Result<Vec<Message>> {
     items
         .iter()
         .map(|item| message_from_proto(Some(item)))
+        .collect()
+}
+
+fn users_from_proto(items: &[proto::User]) -> Result<Vec<User>> {
+    items
+        .iter()
+        .map(|item| user_from_proto(Some(item)))
         .collect()
 }
 

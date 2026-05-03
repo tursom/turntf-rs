@@ -74,14 +74,15 @@ pub use errors::{
 };
 pub use http::HttpClient;
 pub use password::{hash_password, hashed_password, plain_password, PasswordInput, PasswordSource};
-pub use store::{BoxError, CursorStore, MemoryCursorStore};
 pub use relay::{Relay, RelayConnection};
+pub use store::{BoxError, CursorStore, MemoryCursorStore};
 pub use types::{
     Attachment, AttachmentType, BlacklistEntry, ClusterNode, CreateUserRequest, Credentials,
-    DeleteUserResult, DeliveryMode, Event, EventLogTrimStatus, LoggedInUser, LoginInfo, Message,
-    MessageCursor, MessageTrimStatus, OnlineNodePresence, OperationsStatus, Packet,
-    PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted, RelayConfig, RelayConfigBuilder,
-    RelayEnvelope, RelayError, RelayKind, RelayState, Reliability, ResolvedSession,
-    ResolvedUserSessions, ScanUserMetadataRequest, SessionRef, Subscription, UpdateUserRequest,
-    UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult, UserRef,
+    DeleteUserResult, DeliveryMode, Event, EventLogTrimStatus, ListUsersRequest, LoggedInUser,
+    LoginInfo, Message, MessageCursor, MessageTrimStatus, OnlineNodePresence, OperationsStatus,
+    Packet, PeerOriginStatus, PeerStatus, ProjectionStatus, RelayAccepted, RelayConfig,
+    RelayConfigBuilder, RelayEnvelope, RelayError, RelayKind, RelayState, Reliability,
+    ResolvedSession, ResolvedUserSessions, ScanUserMetadataRequest, SessionRef, Subscription,
+    UpdateUserRequest, UpsertUserMetadataRequest, User, UserMetadata, UserMetadataScanResult,
+    UserRef,
 };

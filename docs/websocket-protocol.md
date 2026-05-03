@@ -43,6 +43,7 @@ message ClientEnvelope {
     UpsertUserMetadataRequest upsert_user_metadata = 20;  // RPC
     DeleteUserMetadataRequest delete_user_metadata = 21;  // RPC
     ScanUserMetadataRequest scan_user_metadata = 22;      // RPC
+    ListUsersRequest list_users = 23;                     // RPC
   }
 }
 ```
@@ -76,6 +77,7 @@ message ServerEnvelope {
     UpsertUserMetadataResponse upsert_user_metadata_response = 22;
     DeleteUserMetadataResponse delete_user_metadata_response = 23;
     ScanUserMetadataResponse scan_user_metadata_response = 24;
+    ListUsersResponse list_users_response = 25;
   }
 }
 ```
@@ -198,6 +200,29 @@ message SendMessageResponse {
   }
 }
 ```
+
+### ListUsersRequest / ListUsersResponse
+
+```protobuf
+message ListUsersRequest {
+  uint64 request_id = 1;
+  string name = 2;
+  UserRef uid = 3;
+}
+
+message ListUsersResponse {
+  uint64 request_id = 1;
+  repeated User items = 2;
+  int32 count = 3;
+}
+```
+
+约束：
+- `list_users` 返回当前登录用户可通讯的活跃用户集合。
+- `name` 为空或仅包含空白时，表示不按名称过滤。
+- `uid` 省略或传 `{ node_id: 0, user_id: 0 }` 时，表示不按 uid 过滤；只填一半会触发 `invalid_request`。
+- 普通用户查询其他用户时，返回的 `User.login_name` 可能为空；管理员和查询自己时保持可见。
+- `realtime_stream=true` 连接不支持该 RPC。
 
 ### MessagePushed（服务端推送）
 
